@@ -11,6 +11,7 @@ The default set below is opinionated and skews cloud-native / AWS / GitHub-heavy
 - [Wiz blog](https://www.wiz.io/feed/rss.xml) — Cloud security research, supply chain incident coverage
 - [Node.js vulnerability feed](https://nodejs.org/en/feed/vulnerability.xml) — Node.js security releases (primary source, low volume)
 - [Python blog](https://blog.python.org/feeds/posts/default) — CPython releases including security releases; fire-tier bar filters routine posts
+- [NCSC (UK) blog](https://www.ncsc.gov.uk/api/1/services/v1/blog-post-rss-feed.xml) — Editorial guidance and policy analysis (AI risk, OT resilience, crypto/PKI); low-volume (~2/week), not a CVE feed
 
 ## What's intentionally not here
 
