@@ -177,3 +177,25 @@ def test_atomic_save_does_not_corrupt_on_error(tmp_path, monkeypatch):
     state.save_state(s)
     assert (tmp_path / "state.json").exists()
     assert not (tmp_path / "state.json.tmp").exists()
+
+
+# --- sent_only suppression (emergency re-check) ---
+
+def test_is_excluded_sent_only_ignores_candidate_cooldown():
+    """A near-miss from the morning run must be able to come back in the
+    afternoon emergency re-check if it has since escalated."""
+    st = {}
+    state.record_candidates(st, ["https://ex.com/near-miss"])
+    assert state.is_excluded("https://ex.com/near-miss", st) is True
+    assert state.is_excluded("https://ex.com/near-miss", st, sent_only=True) is False
+
+
+def test_is_excluded_sent_only_still_suppresses_delivered():
+    st = {}
+    state.record_sent(st, ["https://ex.com/already-sent"], headline="h")
+    assert state.is_excluded("https://ex.com/already-sent", st, sent_only=True) is True
+
+
+def test_is_excluded_unknown_url_is_never_excluded():
+    assert state.is_excluded("https://ex.com/new", {}) is False
+    assert state.is_excluded("https://ex.com/new", {}, sent_only=True) is False

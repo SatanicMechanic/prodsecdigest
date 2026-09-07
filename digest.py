@@ -17,21 +17,20 @@ import concurrent.futures
 from dotenv import load_dotenv
 
 from llm import (
-    generate_anchored_queries, generate_independent_queries,
-    generate_slow_queries, generate_tooling_scan_queries,
-    generate_ai_lab_queries,
+    generate_anchored_queries, generate_slow_queries, generate_slot_queries,
     build_triage_input, parse_triage_output, call_llm, enrich_items,
-    ANCHORED_QUERIES, INDEPENDENT_QUERIES,
+    QUERY_SLOTS, ANCHORED_QUERIES,
     STACK_SUMMARY,
 )
 from config import (
-    COMPLIANCE_QUERIES, PQC_QUERIES, TOOLING_SCAN_QUERIES, AI_LAB_QUERIES,
+    COMPLIANCE_QUERIES, PQC_QUERIES,
     TRIAGE_GLOBAL_CAP, TRIAGE_TOOLING_CAP,
     LLM_TIMEOUT_SEC, LLM_API_KEY_ENV, LLM_MODEL, LLM_PROVIDER,
     MAX_SEARCH_RESULTS, BROAD_SEARCH_RESULTS,
 )
 from fetchers import fetch_rss_articles, fetch_search_articles
-from state import load_state, save_state, record_candidates, record_sent, recent_sent_headlines, sent_today
+from state import (load_state, save_state, record_candidates, record_sent,
+                   recent_sent_headlines, sent_today, normalize_url)
 from render import render_html, render_slack, render_text, subject_line
 from mailer import send_email
 from slack import send_slack
@@ -73,8 +72,41 @@ def _load_prompt(filename: str, today_str: str, lookback_hours: int) -> str:
             .replace("{{STACK}}", STACK_SUMMARY))
 
 
+def _ground_urls(items, pool_urls: set[str]):
+    """Drop triage items whose URL was not in the candidate pool; canonicalize
+    the rest.
+
+    The prompts ask for "the original URL of the primary source", but nothing
+    stops the model from inventing one or cross-wiring two candidates. An
+    ungrounded URL is emailed to the reader and fetched by the enrichment pass,
+    so anything we did not put in front of the model is dropped. Rewriting the
+    survivors to their normalized form also gives the merge dedupe below and
+    state suppression a single URL-equality rule.
+
+    None (a legitimate SKIP) passes through untouched.
+    """
+    if not items:
+        return items
+    grounded = []
+    for item in items:
+        norm = normalize_url(item.get("url") or "")
+        if norm not in pool_urls:
+            print(f"Warning: dropping LLM item whose URL is not in the candidate "
+                  f"pool: {item.get('headline', '(no headline)')!r} -> "
+                  f"{item.get('url')!r}")
+            continue
+        item["url"] = norm
+        grounded.append(item)
+    return grounded
+
+
 def _merge_triage_results(items_a, items_b) -> list:
-    """Merge threat-triage and tooling-triage outputs with dedup and slot caps."""
+    """Merge threat-triage and tooling-triage outputs with dedup and slot caps.
+
+    Dedup uses normalize_url — the same rule state suppression uses — so a
+    story that appears once with tracking params and once bare collapses here
+    instead of surviving as two items.
+    """
     a = items_a or []
     b = items_b or []
 
@@ -82,12 +114,12 @@ def _merge_triage_results(items_a, items_b) -> list:
     deduped_a: list = []
     deduped_b: list = []
     for it in a:
-        u = (it.get("url") or "").strip().lower()
+        u = normalize_url(it.get("url") or "")
         if u and u not in seen:
             seen.add(u)
             deduped_a.append(it)
     for it in b:
-        u = (it.get("url") or "").strip().lower()
+        u = normalize_url(it.get("url") or "")
         if u and u not in seen:
             seen.add(u)
             deduped_b.append(it)
@@ -98,14 +130,60 @@ def _merge_triage_results(items_a, items_b) -> list:
     return (a_picks + b_picks)[:TRIAGE_GLOBAL_CAP]
 
 
+def _no_digest_reason(degraded: list[str], emergency: bool) -> str:
+    """The line printed when a run ends without sending.
+
+    Three outcomes end here and they are not the same event: the model looked
+    and found nothing, the emergency re-check found nothing critical, or we
+    never got a usable answer. Printing one message for all three made a
+    broken run read as a quiet news day.
+    """
+    if degraded:
+        return (f"DEGRADED — no digest sent: {'; '.join(degraded)}. "
+                f"This is not an editorial SKIP.")
+    if emergency:
+        return ("Emergency re-check clear — nothing critical since the earlier "
+                "digest. Persisting state and exiting.")
+    return ("Nothing noteworthy today (SKIP — triage returned a clean skip). "
+            "Persisting state and exiting.")
+
+
+def _emergency_filter(items: list) -> list:
+    """The out-of-band bar: one critical threat, or nothing.
+
+    Triage already selects on fire-tier, but that bar delivers the daily
+    digest. Re-interrupting a reader who has had their digest today needs a
+    higher one, and severity is the gate the model already assigns — no second
+    prompt to keep in sync.
+    """
+    qualifying = [i for i in items
+                  if (i.get("severity") or "").lower() == "critical"
+                  and (i.get("category") or "").lower() == "threat"]
+    if items and not qualifying:
+        # Only when something actually survived triage — otherwise the caller's
+        # SKIP/DEGRADED line already says what happened, and this would claim
+        # "nothing critical" about items that were dropped upstream.
+        print(f"Emergency re-check found nothing critical "
+              f"({len(items)} item(s) triaged, none qualifying).")
+    return qualifying[:1]
+
+
 def _fail_on_total_triage_failure(threat_exc: Exception | None,
-                                   tooling_exc: Exception | None) -> None:
+                                   tooling_exc: Exception | None,
+                                   emergency: bool = False) -> None:
     """Both triage calls failing (not a legitimate SKIP) means an outage —
     auth, billing, network — not a quiet news day. A silent return here would
     let a scheduled run finish "successfully" having sent nothing; raise
     instead so the Actions run goes red and GitHub's scheduled-workflow
     failure notification actually fires.
     """
+    if emergency:
+        # Only the threat call runs on this path, so "both failed" would be a
+        # confusing thing to read on a red run.
+        raise RuntimeError(
+            "Emergency re-check triage failed — no re-check happened this run. "
+            f"Threat: {threat_exc!r}."
+        )
     raise RuntimeError(
         "Both triage calls failed — no digest sent this run. "
         f"Threat: {threat_exc!r}. Tooling: {tooling_exc!r}."
@@ -126,15 +204,27 @@ def run() -> None:
     state = load_state()
     print(f"Loaded state: {len(state)} URLs in dedup/cooldown window.")
 
-    # Skip the entire pipeline if an earlier run today already delivered.
-    # Both scheduled runs (11:00 and 23:00 UTC) fall on the same UTC date,
-    # so date-equality is a sound check; revisit if the schedule changes.
-    if sent_today(state):
-        print("An earlier run today already delivered a digest. Skipping pipeline.")
-        return
+    # An earlier run today already delivered, so this is the emergency
+    # re-check rather than the daily digest. It exists because a low-stakes
+    # tooling item in the morning used to consume the day's delivery slot and
+    # blind the afternoon run to an actual fire. The bar is deliberately much
+    # higher: threats only, critical only, at most one item.
+    #
+    # Both scheduled runs (11:00 and 23:00 UTC) fall on the same UTC date, so
+    # date-equality is a sound check; revisit if the schedule changes.
+    emergency = sent_today(state)
+    if emergency:
+        print("An earlier run today already delivered. Emergency re-check only: "
+              "threats, critical severity, at most 1 item.")
 
     # --- RSS ---
-    rss_articles, rss_stats = fetch_rss_articles(lookback_hours, state)
+    # The candidate cooldown is skipped in emergency mode: a story that was a
+    # near-miss this morning and has since escalated has to be able to come
+    # back. Sent-suppression still applies, so nothing already delivered
+    # returns, and the recent-headlines block below still bars follow-up
+    # coverage of the same event.
+    rss_articles, rss_stats = fetch_rss_articles(lookback_hours, state,
+                                                 sent_only=emergency)
     print(f"RSS: {len(rss_articles)} articles after dedup/blocklist.")
 
     # --- Query generation ---
@@ -143,15 +233,25 @@ def run() -> None:
     for q in anchored:
         print(f"  [anchored] → {q}")
 
-    print(f"Generating {INDEPENDENT_QUERIES} independent queries...")
-    independent = generate_independent_queries(lookback_hours)
-    for q in independent:
-        print(f"  [independent] → {q}")
+    # tooling-scan and ai-lab cannot produce a fire-tier threat, so the
+    # emergency re-check pays for neither.
+    active_slots = [s for s in QUERY_SLOTS
+                    if not emergency or s.label == "independent"]
+    slot_specs: dict[str, list[dict]] = {}
+    for slot in active_slots:
+        print(f"Generating {slot.n_queries} {slot.label} queries...")
+        queries = generate_slot_queries(slot, lookback_hours)
+        for q in queries:
+            print(f"  [{slot.label}] → {q}")
+        slot_specs[slot.label] = [
+            {"label": slot.label, "query": q, "count": slot.n_results}
+            for q in queries
+        ]
 
     # Compliance + PQC are slow-moving beats with little genuinely new coverage
     # day-to-day, so daily polling just guarantees backfill noise. Restricted
     # to the Monday catch-up run (72h lookback).
-    if lookback_hours >= 48:
+    if lookback_hours >= 48 and not emergency:
         print(f"Generating {COMPLIANCE_QUERIES} compliance + {PQC_QUERIES} PQC queries (combined call)...")
         compliance, pqc = generate_slow_queries(lookback_hours)
         for q in compliance:
@@ -160,17 +260,8 @@ def run() -> None:
             print(f"  [pqc] → {q}")
     else:
         compliance, pqc = [], []
-        print("Skipping compliance + PQC queries (weekly-only; not a Monday catch-up run).")
-
-    print(f"Generating {TOOLING_SCAN_QUERIES} tooling-scan queries...")
-    tooling_scan = generate_tooling_scan_queries(lookback_hours)
-    for q in tooling_scan:
-        print(f"  [tooling-scan] → {q}")
-
-    print(f"Generating {AI_LAB_QUERIES} AI-lab queries...")
-    ai_lab = generate_ai_lab_queries(lookback_hours)
-    for q in ai_lab:
-        print(f"  [ai-lab] → {q}")
+        print("Skipping compliance + PQC queries "
+              "(weekly-only, and never on the emergency re-check).")
 
     # --- Search ---
     # Labeled query specs carry a per-type result count and a label so the SKIP
@@ -183,11 +274,11 @@ def run() -> None:
 
     query_specs = (
         _specs("anchored", anchored, MAX_SEARCH_RESULTS)
-        + _specs("independent", independent, BROAD_SEARCH_RESULTS)
+        + slot_specs.get("independent", [])
         + _specs("compliance", compliance, BROAD_SEARCH_RESULTS)
         + _specs("pqc", pqc, BROAD_SEARCH_RESULTS)
-        + _specs("tooling-scan", tooling_scan, MAX_SEARCH_RESULTS)
-        + _specs("ai-lab", ai_lab, MAX_SEARCH_RESULTS)
+        + slot_specs.get("tooling-scan", [])
+        + slot_specs.get("ai-lab", [])
     )
 
     search_articles: list[dict] = []
@@ -195,6 +286,7 @@ def run() -> None:
     if query_specs:
         search_articles, search_stats = fetch_search_articles(
             query_specs, lookback_hours, state, rss_articles,
+            sent_only=emergency,
         )
 
     all_articles = rss_articles + search_articles
@@ -271,7 +363,7 @@ def run() -> None:
             call_llm, threat_prompt, threat_user_msg,
             temperature=0.15, json_mode=True,
         )
-        fut_tooling = executor.submit(
+        fut_tooling = None if emergency else executor.submit(
             call_llm, tooling_prompt, tooling_user_msg,
             temperature=0.15, json_mode=True,
         )
@@ -280,11 +372,12 @@ def run() -> None:
         except Exception as exc:
             threat_exc = exc
             print(f"Threat triage call failed: {exc}")
-        try:
-            raw_tooling = fut_tooling.result(timeout=triage_deadline)
-        except Exception as exc:
-            tooling_exc = exc
-            print(f"Tooling triage call failed: {exc}")
+        if fut_tooling is not None:
+            try:
+                raw_tooling = fut_tooling.result(timeout=triage_deadline)
+            except Exception as exc:
+                tooling_exc = exc
+                print(f"Tooling triage call failed: {exc}")
 
     pool_summary = (
         f"RSS pool: {rss_stats['fetched']} fetched"
@@ -295,9 +388,11 @@ def run() -> None:
         f" -> {search_stats['after_rss_dedup']} after RSS dedup"
         f" -> {search_stats['after_state_dedup']} after state dedup"
         f" -> {search_stats['after_blocklist']} after blocklist\n"
-        f"Queries: {len(anchored)} anchored, {len(independent)} independent,"
+        f"Queries: {len(anchored)} anchored,"
+        f" {len(slot_specs.get('independent', []))} independent,"
         f" {len(compliance)} compliance, {len(pqc)} pqc,"
-        f" {len(tooling_scan)} tooling-scan, {len(ai_lab)} ai-lab\n"
+        f" {len(slot_specs.get('tooling-scan', []))} tooling-scan,"
+        f" {len(slot_specs.get('ai-lab', []))} ai-lab\n"
         f"Triage candidates: {len(all_articles)} total"
         f" ({len(rss_articles)} RSS + {len(search_articles)} search)\n"
     )
@@ -313,27 +408,60 @@ def run() -> None:
 
     if not raw_threat and not raw_tooling:
         save_state(state)
-        _fail_on_total_triage_failure(threat_exc, tooling_exc)
+        _fail_on_total_triage_failure(threat_exc, tooling_exc, emergency)
 
     # Parse each call independently: bad JSON from one must not discard the
     # other's good output or crash the run before save_state.
+    #
+    # `degraded` separates "the model looked and found nothing" from "we never
+    # got a usable answer". Both end with no email, and without this they print
+    # the same line — so a broken run reads as a quiet news day.
+    degraded: list[str] = []
+
     def _safe_parse(raw: str, label: str):
         if not raw:
+            degraded.append(f"{label.lower()} triage call failed")
             return None
+        stats: dict = {}
         try:
-            return parse_triage_output(raw)
+            parsed = parse_triage_output(raw, stats)
         except RuntimeError as exc:
+            degraded.append(f"{label.lower()} triage returned unparseable JSON")
             print(f"{label} triage output unusable: {exc}")
             return None
+        # Every item the model sent was rejected by the schema or hallucination
+        # guards. That is an empty list either way, but it is not the model
+        # deciding there was nothing worth sending. Partial drops are normal
+        # filtering and are not flagged — the per-item warnings cover those.
+        if parsed == [] and stats.get("returned", 0) > 0:
+            degraded.append(f"{label.lower()} triage returned "
+                            f"{stats['dropped']} item(s), all rejected by the "
+                            f"schema/hallucination guards")
+        return parsed
 
-    items_threat = _safe_parse(raw_threat, "Threat")
-    items_tooling = _safe_parse(raw_tooling, "Tooling")
+    pool_urls = {normalize_url(a["link"]) for a in all_articles if a.get("link")}
+
+    def _parse_and_ground(raw: str, label: str):
+        parsed = _safe_parse(raw, label)
+        grounded = _ground_urls(parsed, pool_urls)
+        if parsed and not grounded:
+            degraded.append(f"{label.lower()} triage returned only ungrounded URLs")
+        return grounded
+
+    items_threat = _parse_and_ground(raw_threat, "Threat")
+    items_tooling = [] if emergency else _parse_and_ground(raw_tooling, "Tooling")
 
     items = _merge_triage_results(items_threat, items_tooling)
+    if emergency:
+        items = _emergency_filter(items)
     if not items:
-        print("Nothing noteworthy today (SKIP). Persisting state and exiting.")
+        print(_no_digest_reason(degraded, emergency))
         save_state(state)
         return
+    if degraded:
+        # Partial failure that still delivered: worth seeing in the log even
+        # though the run is green.
+        print(f"Note: delivering a partial digest — {'; '.join(degraded)}.")
 
     # --- Second-pass enrichment ---
     # Triage selected on title + short summary; fetch the chosen articles and
@@ -346,10 +474,11 @@ def run() -> None:
         print(f"Enrichment pass failed (continuing with triage output): {exc}")
 
     # --- Render and send ---
-    print(f"Rendering and sending {len(items)} item(s).")
+    print(f"Rendering and sending {len(items)} item(s)"
+          f"{' as an out-of-band alert' if emergency else ''}.")
     html_body = render_html(items, today_str)
     text_body = render_text(items, today_str)
-    subject = subject_line(items, today_str)
+    subject = subject_line(items, today_str, alert=emergency)
     send_email(html_body, text_body, subject)
     send_slack(render_slack(items, today_str))
 

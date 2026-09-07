@@ -53,6 +53,31 @@ def _esc(s: str) -> str:
     return html.escape(s or "", quote=True)
 
 
+def _source_domain(url: str) -> str:
+    """Host of an http(s) URL, minus a leading www. Empty if not renderable.
+
+    Shown so the reader can weigh the source before clicking — a vendor
+    advisory and an aggregator repost are not the same evidence.
+    """
+    if _safe_url(url) == "#":
+        return ""
+    try:
+        host = urlsplit(url).netloc.lower()
+    except ValueError:
+        return ""
+    return host[4:] if host.startswith("www.") else host
+
+
+def _stack_note(item: dict) -> str:
+    """The verbatim stack.txt quote a threat item grounded its relevance in.
+
+    Parsed and validated in llm._stack_grounded but never shown until now.
+    It names the part of the stack the story concerns — not a claim that
+    anything is exposed.
+    """
+    return (item.get("stack_match") or "").strip()
+
+
 # ---------------------------------------------------------------------------
 # HTML
 # ---------------------------------------------------------------------------
@@ -68,6 +93,21 @@ def _item_card(index: int, item: dict) -> str:
     why = _esc(item.get("why", ""))
     action = _esc(item.get("action", ""))
     url = _safe_url(item.get("url", ""))
+
+    meta_bits = []
+    domain = _source_domain(item.get("url", ""))
+    if domain:
+        meta_bits.append(f"Source: {_esc(domain)}")
+    stack = _stack_note(item)
+    if stack:
+        meta_bits.append(f"Stack: {_esc(stack)}")
+    meta_html = ""
+    if meta_bits:
+        meta_html = f"""
+              <p style="margin:18px 0 0 0; font-size:11px; font-family:{_MONO};
+                         letter-spacing:0.06em; color:{_TEXT_MUTED};">
+                {"  ·  ".join(meta_bits)}
+              </p>"""
     link_html = ""
     if url != "#":
         link_html = f"""
@@ -115,23 +155,15 @@ def _item_card(index: int, item: dict) -> str:
                 {headline}
               </p>
 
-              <p style="margin:18px 0 5px 0; font-size:11px; font-family:{_MONO};
-                         text-transform:uppercase; letter-spacing:0.1em; color:{_TEXT_MUTED};">
-                Why it matters
-              </p>
-              <p style="margin:0; font-size:14px; color:{_TEXT_DIM}; line-height:1.62;">
-                {why}
-              </p>
-
               <table width="100%" cellpadding="0" cellspacing="0" border="0"
-                     style="margin-top:18px;">
+                     style="margin-top:16px;">
                 <tr>
                   <td style="background:{_INSET_BG}; border:1px solid {_BORDER};
                              padding:14px 16px;">
                     <p style="margin:0 0 5px 0; font-size:11px; font-family:{_MONO};
                                text-transform:uppercase; letter-spacing:0.1em;
                                color:{_AMBER};">
-                      Action
+                      Do now
                     </p>
                     <p style="margin:0; font-size:14px; color:{_TEXT};
                                line-height:1.62;">
@@ -140,7 +172,15 @@ def _item_card(index: int, item: dict) -> str:
                   </td>
                 </tr>
               </table>
-              {link_html}
+
+              <p style="margin:18px 0 5px 0; font-size:11px; font-family:{_MONO};
+                         text-transform:uppercase; letter-spacing:0.1em; color:{_TEXT_MUTED};">
+                Why it matters
+              </p>
+              <p style="margin:0; font-size:14px; color:{_TEXT_DIM}; line-height:1.62;">
+                {why}
+              </p>
+              {meta_html}{link_html}
 
             </td>
           </tr>
@@ -246,8 +286,14 @@ def render_text(items: list[dict], date_str: str) -> str:
         sev = (item.get("severity") or "").upper()
         out.append(f"{i}. [{cat} / {sev}] {item.get('headline','')}")
         out.append("")
+        out.append(f"   Do now: {item.get('action','')}")
         out.append(f"   Why: {item.get('why','')}")
-        out.append(f"   Action: {item.get('action','')}")
+        stack = _stack_note(item)
+        if stack:
+            out.append(f"   Stack: {stack}")
+        domain = _source_domain(item.get("url", ""))
+        if domain:
+            out.append(f"   Source: {domain}")
         url = _safe_url(item.get("url", ""))
         if url != "#":
             out.append(f"   Link: {url}")
@@ -261,18 +307,38 @@ def render_text(items: list[dict], date_str: str) -> str:
 # Subject line
 # ---------------------------------------------------------------------------
 
-def subject_line(items: list[dict], date_str: str) -> str:
-    """Prefix a severity indicator so Critical/High digests sort visually."""
+def _clip(text: str, limit: int) -> str:
+    """Collapse whitespace and cap length, for LLM text entering a header.
+
+    Both halves matter and neither is optional: a CR/LF in a mail subject is
+    header injection, and an LLM headline has no length bound of its own, so
+    an uncapped one produces a broken subject or notification.
+    """
+    flat = " ".join((text or "").split())
+    return flat if len(flat) <= limit else flat[:limit - 1].rstrip() + "…"
+
+
+def _severity_prefix(items: list[dict]) -> str:
     severities = {(i.get("severity") or "").lower() for i in items}
     if "critical" in severities:
-        prefix = "🛡️🔴"
-    elif "high" in severities:
-        prefix = "🛡️🟠"
-    else:
-        prefix = "🛡️"
+        return "🛡️🔴"
+    if "high" in severities:
+        return "🛡️🟠"
+    return "🛡️"
+
+
+def subject_line(items: list[dict], date_str: str, alert: bool = False) -> str:
+    """Prefix a severity indicator so Critical/High digests sort visually.
+
+    alert=True is the out-of-band emergency re-check: one item, and the reader
+    needs to know what it is from the notification alone.
+    """
+    if alert and items:
+        lead = _clip(items[0].get("headline"), 120)
+        return f"{_severity_prefix(items)} ALERT — {lead}"
     n = len(items)
     suffix = f"({n} item{'s' if n != 1 else ''})"
-    return f"{prefix} Need to Know — {date_str} {suffix}"
+    return f"{_severity_prefix(items)} Need to Know — {date_str} {suffix}"
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +348,21 @@ def subject_line(items: list[dict], date_str: str) -> str:
 def _slack_esc(s: str) -> str:
     """Slack's three reserved characters, so LLM text can't forge <url|link> markup."""
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def slack_fallback(items: list[dict], date_str: str) -> str:
+    """Notification / sidebar preview text.
+
+    Escaped like any other item text: an unescaped headline could forge
+    <url|label> markup in the one place the reader sees before clicking.
+    """
+    if not items:
+        return subject_line(items, date_str)
+    more = f" (+{len(items) - 1} more)" if len(items) > 1 else ""
+    # Clip before escaping: _slack_esc expands & into &amp;, and slicing after
+    # that can cut an entity in half.
+    lead = _clip(items[0].get("headline"), 150)
+    return f"{_severity_prefix(items)} {_slack_esc(lead)}{more}"
 
 
 def render_slack(items: list[dict], date_str: str) -> dict:
@@ -304,29 +385,42 @@ def render_slack(items: list[dict], date_str: str) -> dict:
         if url != "#":
             headline = f"<{url}|{headline}>"
 
-        attachments.append({
-            "color": color,
-            "blocks": [
-                {"type": "context", "elements": [{
-                    "type": "mrkdwn",
-                    "text": f"*{_slack_esc(sev_label)}*  ·  {_slack_esc(cat_label)}",
-                }]},
-                {"type": "section", "text": {
-                    "type": "mrkdwn", "text": f"*{headline}*"}},
-                {"type": "section", "text": {
-                    "type": "mrkdwn",
-                    "text": f"*Why it matters*\n{_slack_esc(item.get('why', ''))}",
-                }},
-                {"type": "section", "text": {
-                    "type": "mrkdwn",
-                    "text": f"*Action*\n{_slack_esc(item.get('action', ''))}",
-                }},
-            ],
-        })
+        blocks = [
+            {"type": "context", "elements": [{
+                "type": "mrkdwn",
+                "text": f"*{_slack_esc(sev_label)}*  ·  {_slack_esc(cat_label)}",
+            }]},
+            {"type": "section", "text": {
+                "type": "mrkdwn", "text": f"*{headline}*"}},
+            {"type": "section", "text": {
+                "type": "mrkdwn",
+                "text": f"*Do now*\n{_slack_esc(item.get('action', ''))}",
+            }},
+            {"type": "section", "text": {
+                "type": "mrkdwn",
+                "text": f"*Why it matters*\n{_slack_esc(item.get('why', ''))}",
+            }},
+        ]
+
+        meta_bits = []
+        domain = _source_domain(item.get("url", ""))
+        if domain:
+            meta_bits.append(f"Source: {_slack_esc(domain)}")
+        stack = _stack_note(item)
+        if stack:
+            meta_bits.append(f"Stack: {_slack_esc(stack)}")
+        if meta_bits:
+            blocks.append({"type": "context", "elements": [{
+                "type": "mrkdwn", "text": "  ·  ".join(meta_bits),
+            }]})
+
+        attachments.append({"color": color, "blocks": blocks})
 
     return {
         # Fallback: what push notifications and the sidebar preview show.
-        "text": subject_line(items, date_str),
+        # The lead headline goes first — a notification truncates, and the
+        # subject line repeats verbatim in the header block below anyway.
+        "text": slack_fallback(items, date_str),
         "blocks": [{"type": "header", "text": {
             "type": "plain_text",
             "text": subject_line(items, date_str)[:150],

@@ -122,3 +122,106 @@ def test_fail_on_total_triage_failure_message_includes_both_exceptions():
     with pytest.raises(RuntimeError) as exc_info:
         _fail_on_total_triage_failure(ValueError("bad key"), None)
     assert "bad key" in str(exc_info.value)
+
+
+# --- URL grounding (triage output must point at the pool we showed the model) ---
+
+from digest import _ground_urls  # noqa: E402
+
+
+def test_ground_urls_drops_url_not_in_pool():
+    """An invented URL would be emailed to the reader and fetched by the
+    enrichment pass, so it must not survive triage."""
+    pool = {"https://ex.com/real"}
+    items = [_item("https://ex.com/real"), _item("https://evil.example/invented")]
+    kept = _ground_urls(items, pool)
+    assert [i["url"] for i in kept] == ["https://ex.com/real"]
+
+
+def test_ground_urls_canonicalizes_survivors():
+    """A pool URL echoed back with tracking params or a trailing slash is a
+    real candidate — keep it, but rewrite it to the form state suppression
+    and the merge dedupe both use."""
+    pool = {"https://ex.com/story"}
+    kept = _ground_urls([_item("https://ex.com/story/?utm_source=newsletter")], pool)
+    assert [i["url"] for i in kept] == ["https://ex.com/story"]
+
+
+def test_ground_urls_passes_skip_through():
+    assert _ground_urls(None, {"https://ex.com/a"}) is None
+
+
+def test_ground_urls_empty_pool_drops_everything():
+    assert _ground_urls([_item("https://ex.com/a")], set()) == []
+
+
+def test_merge_dedupes_tracking_param_variants():
+    """Same story, one copy with tracking params: one URL-equality rule means
+    it collapses here instead of surviving as two items."""
+    out = _merge_triage_results(
+        [_item("https://ex.com/x?utm_source=nl"), _item("https://ex.com/x")], []
+    )
+    assert len(out) == 1
+
+
+def test_merge_dedupes_trailing_slash_variants():
+    out = _merge_triage_results([_item("https://ex.com/x/")], [_item("https://ex.com/x")])
+    assert len(out) == 1
+
+
+# --- Emergency re-check bar ---
+
+from digest import _emergency_filter, _no_digest_reason  # noqa: E402
+
+
+def test_emergency_filter_keeps_one_critical_threat():
+    items = [_item("https://ex.com/a", headline="crit")]
+    items[0]["severity"] = "critical"
+    assert [i["url"] for i in _emergency_filter(items)] == ["https://ex.com/a"]
+
+
+def test_emergency_filter_drops_non_critical():
+    """A high-severity item is digest-worthy but not worth re-interrupting a
+    reader who already got today's digest."""
+    items = [_item("https://ex.com/a")]  # severity "high"
+    assert _emergency_filter(items) == []
+
+
+def test_emergency_filter_drops_non_threat_categories():
+    item = _item("https://ex.com/a", category="tooling")
+    item["severity"] = "critical"
+    assert _emergency_filter([item]) == []
+
+
+def test_emergency_filter_caps_at_one():
+    items = []
+    for n in range(3):
+        it = _item(f"https://ex.com/{n}")
+        it["severity"] = "critical"
+        items.append(it)
+    assert len(_emergency_filter(items)) == 1
+
+
+# --- Degraded vs healthy skip ---
+
+def test_no_digest_reason_degraded_is_not_a_skip():
+    msg = _no_digest_reason(["threat triage returned unparseable JSON"], False)
+    assert "DEGRADED" in msg
+    assert "unparseable JSON" in msg
+
+
+def test_no_digest_reason_degraded_wins_over_emergency():
+    msg = _no_digest_reason(["threat triage call failed"], True)
+    assert "DEGRADED" in msg
+
+
+def test_no_digest_reason_healthy_skip():
+    msg = _no_digest_reason([], False)
+    assert "SKIP" in msg
+    assert "DEGRADED" not in msg
+
+
+def test_no_digest_reason_emergency_clear():
+    msg = _no_digest_reason([], True)
+    assert "Emergency re-check clear" in msg
+    assert "DEGRADED" not in msg

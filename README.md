@@ -1,7 +1,5 @@
 # n2ksecdigest
 
-![Clones](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/SatanicMechanic/n2ksecdigest/main/badges/clones.json&cacheSeconds=3600)
-
 > **This repo is a template and does not run.** Every scheduled workflow is gated off this repository; the bot only starts working once you mirror it and configure your own copy ([§3](#3-stack-description-and-why-you-want-a-private-fork)). `stack.txt` and `feeds.md` ship as starter content for you to replace.
 
 Automated product-security news digest. Runs on GitHub Actions twice each weekday, fetches from RSS and web search, triages through any OpenAI-compatible LLM provider (**GitHub Models by default — no third-party account needed**; presets also cover xAI, Mistral, OpenAI, Groq, OpenRouter, Together, DeepSeek, and Ollama, and you pick the model) against a **news-cycle fire-tier bar**, and emails a short digest via Resend.
@@ -105,7 +103,7 @@ Two related boundaries worth knowing: outbound article fetches are restricted to
 
 ## Setup
 
-**This repo is a template and is inert.** `digest.yml`, `check_feeds.yml`, and `sync-upstream.yml` are all gated on `github.repository != 'SatanicMechanic/n2ksecdigest'`, so nothing scheduled runs here except the clone-count badge. They activate automatically in your fork or private mirror.
+**This repo is a template and is inert.** `digest.yml`, `check_feeds.yml`, and `sync-upstream.yml` are all gated on `github.repository != 'SatanicMechanic/n2ksecdigest'`, so nothing scheduled runs here at all. They activate automatically in your fork or private mirror.
 
 **Which means: in your copy they start running on GitHub's schedule immediately**, using *your* repo's secrets — that's by design (§3 below is written for you). Until you finish this Setup section, `digest.yml` fails fast on every scheduled run (deliberately — it refuses to run without a `stack.txt` and an `LLM_MODEL`; see [§3](#3-stack-description-and-why-you-want-a-private-fork)). If you're not ready to configure it yet, disable Actions under Settings → Actions until you are; otherwise GitHub auto-disables a fork's scheduled workflows after 60 days with no repo activity.
 
@@ -194,8 +192,6 @@ Upgrading to a newer model is editing the `LLM_MODEL` variable — no code chang
 Switching provider is two variables and a secret — e.g. `LLM_PROVIDER=mistral`, `LLM_MODEL=mistral-large-latest`, secret `MISTRAL_API_KEY`. Switching *model* on the same provider is just `LLM_MODEL`. `GH_MODELS_TOKEN`, `XAI_API_KEY`, `MISTRAL_API_KEY`, and `OPENAI_API_KEY` are already wired into `digest.yml`; for any other provider add one `env:` line there. A provider missing from `config.PROVIDERS` works too — set `LLM_BASE_URL` and `LLM_API_KEY_ENV` instead of `LLM_PROVIDER`. An unknown `LLM_PROVIDER` fails fast at startup rather than silently calling the default.
 
 `GH_MODELS_TOKEN` must be a fine-grained PAT with `models:read` — Actions' built-in `GITHUB_TOKEN` does not have that scope. It is the only LLM credential the default setup needs.
-
-`traffic-badge.yml` (upstream-only, see Setup above) needs its own `TRAFFIC_PAT` secret: a fine-grained PAT scoped to this repo only, with **Administration: Read-only** — the traffic/clones API requires that permission, which isn't grantable to `GITHUB_TOKEN` at all.
 
 ### 5. Local run
 

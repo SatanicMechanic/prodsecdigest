@@ -393,3 +393,71 @@ def test_blocklist_patch_tuesday_title_and_youtube():
     assert fetchers._is_blocked(_art("https://www.youtube.com/watch?v=vK9fen8u2IE"))
     assert not fetchers._is_blocked(_art(
         "https://example.com/x", title="Emergency patch for actively exploited zero-day"))
+
+
+# --- Brave auth failure must not abort the run (RSS path stays alive) ---
+
+def test_search_auth_failure_returns_empty_instead_of_raising(monkeypatch):
+    """A bad/expired BRAVE_API_KEY used to propagate out of fetch_search_articles
+    and kill the run before triage, discarding a healthy RSS pool."""
+    monkeypatch.setattr(fetchers, "_BLOCKLIST_URL_PATTERNS", [])
+
+    def fake_brave(query, lookback_hours, count=5):
+        raise RuntimeError("Brave Search auth failure: 401")
+
+    monkeypatch.setattr(fetchers, "search_brave", fake_brave)
+    specs = [{"label": "independent", "query": "q1", "count": 3}]
+    out, stats = fetchers.fetch_search_articles(specs, 24, {}, [])
+    assert out == []
+    assert stats["after_blocklist"] == 0
+
+
+def test_search_auth_failure_stops_remaining_queries(monkeypatch):
+    """Auth is global, so the remaining queries must not each burn a request."""
+    monkeypatch.setattr(fetchers, "_BLOCKLIST_URL_PATTERNS", [])
+    calls = []
+
+    def fake_brave(query, lookback_hours, count=5):
+        calls.append(query)
+        raise RuntimeError("Brave Search auth failure: 403")
+
+    monkeypatch.setattr(fetchers, "search_brave", fake_brave)
+    specs = [{"label": "independent", "query": f"q{i}", "count": 3} for i in range(5)]
+    fetchers.fetch_search_articles(specs, 24, {}, [])
+    assert calls == ["q0"]
+
+
+# --- entry_published fallback ---
+
+class _Entry:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+def test_entry_published_falls_back_when_published_is_malformed():
+    """A malformed published_parsed used to `break` out of the loop, skipping
+    the updated_parsed fallback entirely."""
+    entry = _Entry(published_parsed=("not", "a", "time", "tuple", 0, 0),
+                   updated_parsed=(2026, 4, 14, 9, 30, 0, 0, 0, 0))
+    got = fetchers.entry_published(entry)
+    assert got is not None
+    assert (got.year, got.month, got.day) == (2026, 4, 14)
+
+
+def test_entry_published_returns_none_when_both_malformed():
+    entry = _Entry(published_parsed=("x",) * 6, updated_parsed=("y",) * 6)
+    assert fetchers.entry_published(entry) is None
+
+
+# --- linkless RSS entries ---
+
+def test_parse_one_feed_drops_entries_without_a_link(monkeypatch):
+    """A linkless entry can only reach triage as an item the model must invent
+    a URL for, so it must not consume a pool slot."""
+    xml = b"""<?xml version="1.0"?><rss version="2.0"><channel><title>F</title>
+      <item><title>Has a link</title><link>https://ex.com/a</link></item>
+      <item><title>No link at all</title></item>
+    </channel></rss>"""
+    monkeypatch.setattr(fetchers, "_fetch_feed_bytes", lambda url: xml)
+    out = fetchers._parse_one_feed("f", _cutoff(24))
+    assert [a["title"] for a in out] == ["Has a link"]

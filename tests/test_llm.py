@@ -259,52 +259,74 @@ def test_generate_slow_queries_caps_to_configured_counts(monkeypatch):
     assert len(pqc) == 1
 
 
-# --- generate_tooling_scan_queries ---
+# --- query slots ---
 
-def test_generate_tooling_scan_queries_parses_array(monkeypatch):
+_SLOTS = {s.label: s for s in llm.QUERY_SLOTS}
+_LABELS = list(_SLOTS)
+
+
+@pytest.mark.parametrize("label", _LABELS)
+def test_generate_slot_queries_parses_array(monkeypatch, label):
     monkeypatch.setenv("GH_MODELS_TOKEN", "x")
-    with mock.patch.object(llm, "call_llm", return_value='["AI exploit chain model release"]'):
-        out = llm.generate_tooling_scan_queries(24)
-    assert out == ["AI exploit chain model release"]
+    with mock.patch.object(llm, "call_llm", return_value='["a real query"]'):
+        out = llm.generate_slot_queries(_SLOTS[label], 24)
+    assert out == ["a real query"]
 
 
-def test_generate_tooling_scan_queries_handles_garbage(monkeypatch):
-    monkeypatch.setenv("GH_MODELS_TOKEN", "x")
-    with mock.patch.object(llm, "call_llm", return_value="not json"):
-        out = llm.generate_tooling_scan_queries(24)
-    assert out == []
-
-
-def test_generate_tooling_scan_queries_caps_to_configured_count(monkeypatch):
-    monkeypatch.setenv("GH_MODELS_TOKEN", "x")
-    monkeypatch.setattr(llm, "TOOLING_SCAN_QUERIES", 1)
-    with mock.patch.object(llm, "call_llm", return_value='["a", "b", "c"]'):
-        out = llm.generate_tooling_scan_queries(24)
-    assert len(out) == 1
-
-
-# --- generate_ai_lab_queries ---
-
-def test_generate_ai_lab_queries_parses_array(monkeypatch):
-    monkeypatch.setenv("GH_MODELS_TOKEN", "x")
-    with mock.patch.object(llm, "call_llm", return_value='["Anthropic Claude Mythos cyber capability"]'):
-        out = llm.generate_ai_lab_queries(24)
-    assert out == ["Anthropic Claude Mythos cyber capability"]
-
-
-def test_generate_ai_lab_queries_handles_garbage(monkeypatch):
+@pytest.mark.parametrize("label", _LABELS)
+def test_generate_slot_queries_handles_garbage(monkeypatch, label):
     monkeypatch.setenv("GH_MODELS_TOKEN", "x")
     with mock.patch.object(llm, "call_llm", return_value="not json"):
-        out = llm.generate_ai_lab_queries(24)
-    assert out == []
+        assert llm.generate_slot_queries(_SLOTS[label], 24) == []
 
 
-def test_generate_ai_lab_queries_caps_to_configured_count(monkeypatch):
+@pytest.mark.parametrize("label", _LABELS)
+def test_generate_slot_queries_survives_llm_failure(monkeypatch, label):
+    """A transient provider error must not abort the run — the RSS pool is
+    still worth triaging without this slot's queries."""
     monkeypatch.setenv("GH_MODELS_TOKEN", "x")
-    monkeypatch.setattr(llm, "AI_LAB_QUERIES", 1)
-    with mock.patch.object(llm, "call_llm", return_value='["a", "b", "c"]'):
-        out = llm.generate_ai_lab_queries(24)
-    assert len(out) == 1
+    with mock.patch.object(llm, "call_llm", side_effect=RuntimeError("503")):
+        assert llm.generate_slot_queries(_SLOTS[label], 24) == []
+
+
+@pytest.mark.parametrize("label", _LABELS)
+def test_generate_slot_queries_caps_to_slot_count(monkeypatch, label):
+    slot = _SLOTS[label]
+    monkeypatch.setenv("GH_MODELS_TOKEN", "x")
+    payload = json.dumps([f"q{i}" for i in range(slot.n_queries + 3)])
+    with mock.patch.object(llm, "call_llm", return_value=payload):
+        assert len(llm.generate_slot_queries(slot, 24)) == slot.n_queries
+
+
+@pytest.mark.parametrize("label", _LABELS)
+def test_generate_slot_queries_fills_prompt_placeholders(monkeypatch, label):
+    """A slot whose prompt keeps a literal {n} or {lookback_hours} would ship
+    the placeholder to the model, which is silent and hard to spot in output."""
+    monkeypatch.setenv("GH_MODELS_TOKEN", "x")
+    seen = {}
+
+    def fake(system, user, **kw):
+        seen["system"], seen["user"] = system, user
+        return "[]"
+
+    with mock.patch.object(llm, "call_llm", side_effect=fake):
+        llm.generate_slot_queries(_SLOTS[label], 24)
+    assert "{n}" not in seen["system"]
+    assert "{lookback_hours}" not in seen["system"]
+    assert _SLOTS[label].target in seen["user"]
+
+
+def test_anchored_queries_survive_llm_failure(monkeypatch):
+    monkeypatch.setenv("GH_MODELS_TOKEN", "x")
+    articles = [{"title": "t", "source": "s"}]
+    with mock.patch.object(llm, "call_llm", side_effect=RuntimeError("503")):
+        assert llm.generate_anchored_queries(articles) == []
+
+
+def test_slow_queries_survive_llm_failure(monkeypatch):
+    monkeypatch.setenv("GH_MODELS_TOKEN", "x")
+    with mock.patch.object(llm, "call_llm", side_effect=RuntimeError("503")):
+        assert llm.generate_slow_queries(24) == ([], [])
 
 
 # --- call_llm ---
@@ -378,3 +400,67 @@ def test_call_llm_raises_http_error_on_bad_status(monkeypatch):
     with mock.patch("llm.requests.post", return_value=mock_response), \
          pytest.raises(Exception):
         llm.call_llm("sys", "user")
+
+
+# --- parse_triage_output drop accounting ---
+# An empty list from the guards looks identical to an editorial skip. The
+# caller needs the counts to tell a broken run from a quiet one.
+
+def _valid(headline="ok", **kw):
+    item = {"headline": headline, "category": "threat", "severity": "high",
+            "why": "w", "action": "a", "url": "https://example.com",
+            "stack_match": "GitHub"}
+    item.update(kw)
+    return item
+
+
+def test_stats_report_zero_drops_for_clean_output(monkeypatch):
+    monkeypatch.setattr(llm, "STACK_SUMMARY", "CI/CD & SCM: GitHub")
+    stats = {}
+    llm.parse_triage_output(json.dumps({"items": [_valid()]}), stats)
+    assert stats == {"returned": 1, "dropped": 0}
+
+
+def test_stats_count_every_guard(monkeypatch):
+    """Missing fields, placeholder CVE, failed stack-grounding, and a
+    non-dict entry all count as drops."""
+    monkeypatch.setattr(llm, "STACK_SUMMARY", "CI/CD & SCM: GitHub")
+    payload = {"items": [
+        _valid("kept"),
+        {"headline": "no url", "category": "threat", "severity": "high",
+         "why": "w", "action": "a"},
+        _valid("fake cve", why="see CVE-2026-XXXX"),
+        _valid("ungrounded", stack_match="Kubernetes"),
+        "not even a dict",
+    ]}
+    stats = {}
+    items = llm.parse_triage_output(json.dumps(payload), stats)
+    assert [i["headline"] for i in items] == ["kept"]
+    assert stats == {"returned": 5, "dropped": 4}
+
+
+def test_stats_distinguish_all_dropped_from_empty_items(monkeypatch):
+    """The case the caller acts on: the model sent items and the guards
+    rejected every one. Both produce [], only one is degraded."""
+    monkeypatch.setattr(llm, "STACK_SUMMARY", "CI/CD & SCM: GitHub")
+
+    all_dropped = {}
+    assert llm.parse_triage_output(
+        json.dumps({"items": [_valid("bad", stack_match="Kubernetes")]}),
+        all_dropped) == []
+    assert all_dropped["returned"] > 0 and all_dropped["dropped"] > 0
+
+    nothing_found = {}
+    assert llm.parse_triage_output(json.dumps({"items": []}), nothing_found) == []
+    assert nothing_found == {"returned": 0, "dropped": 0}
+
+
+def test_stats_untouched_on_skip(monkeypatch):
+    stats = {}
+    assert llm.parse_triage_output('{"skip": true}', stats) is None
+    assert stats == {}
+
+
+def test_stats_argument_stays_optional(monkeypatch):
+    monkeypatch.setattr(llm, "STACK_SUMMARY", "CI/CD & SCM: GitHub")
+    assert len(llm.parse_triage_output(json.dumps({"items": [_valid()]}))) == 1

@@ -107,9 +107,17 @@ def save_state(state: dict) -> None:
     os.replace(tmp, path)
 
 
-def is_excluded(url: str, state: dict) -> bool:
-    """True if the URL is in either the sent-suppression set or candidate cooldown."""
-    return normalize_url(url) in state
+def is_excluded(url: str, state: dict, sent_only: bool = False) -> bool:
+    """True if the URL is in either the sent-suppression set or candidate cooldown.
+
+    sent_only=True checks the sent set alone. The emergency re-check path uses
+    it: a story that was a near-miss this morning and has since escalated must
+    be able to come back, but anything already delivered stays suppressed.
+    """
+    entry = state.get(normalize_url(url))
+    if entry is None:
+        return False
+    return entry.get("status") == "sent" if sent_only else True
 
 
 def record_candidates(state: dict, urls: list[str]) -> None:

@@ -114,12 +114,12 @@ def entry_published(entry) -> datetime.datetime | None:
     """UTC publish time from a feedparser entry, or None if unparseable."""
     for field in ("published_parsed", "updated_parsed"):
         parsed = getattr(entry, field, None)
-        if parsed:
-            try:
-                return datetime.datetime(*parsed[:6], tzinfo=datetime.timezone.utc)
-            except (TypeError, ValueError):
-                pass
-            break
+        if not parsed:
+            continue
+        try:
+            return datetime.datetime(*parsed[:6], tzinfo=datetime.timezone.utc)
+        except (TypeError, ValueError):
+            continue
     return None
 
 
@@ -140,12 +140,16 @@ def _parse_one_feed(url: str, cutoff: datetime.datetime) -> list[dict]:
         if not title:
             continue
 
+        # A linkless entry can only reach triage as an item the model has to
+        # invent a URL for, so drop it here rather than spend a pool slot.
+        link = (getattr(entry, "link", "") or "").strip()
+        if not link:
+            continue
+
         title_key = title.lower()
         if title_key in seen_titles_in_feed:
             continue
         seen_titles_in_feed.add(title_key)
-
-        link = getattr(entry, "link", "") or ""
         # Strip HTML before truncating so we don't slice through a tag.
         summary = _strip_html(getattr(entry, "summary", "") or "")[:SUMMARY_MAX_CHARS]
 
@@ -159,7 +163,8 @@ def _parse_one_feed(url: str, cutoff: datetime.datetime) -> list[dict]:
     return out
 
 
-def fetch_rss_articles(lookback_hours: int, state: dict) -> tuple[list[dict], dict]:
+def fetch_rss_articles(lookback_hours: int, state: dict,
+                       sent_only: bool = False) -> tuple[list[dict], dict]:
     """Round-robin across feeds, with state/blocklist/cross-feed-title filtering.
 
     Each feed contributes at most PER_FEED_CAP items; total capped at
@@ -193,7 +198,7 @@ def fetch_rss_articles(lookback_hours: int, state: dict) -> tuple[list[dict], di
             total_popped += 1
             progressed = True
 
-            if is_excluded(article["link"], state):
+            if is_excluded(article["link"], state, sent_only):
                 excl_state += 1
                 continue
             if _is_blocked(article):
@@ -324,7 +329,8 @@ def search_brave(query: str, lookback_hours: int,
 
 
 def fetch_search_articles(query_specs: list[dict], lookback_hours: int,
-                          state: dict, rss_articles: list[dict]) -> tuple[list[dict], dict]:
+                          state: dict, rss_articles: list[dict],
+                          sent_only: bool = False) -> tuple[list[dict], dict]:
     """Run all queries, dedupe against RSS pool and prior state, apply blocklist.
 
     `query_specs` is a list of dicts: {"label": str, "query": str, "count": int}.
@@ -347,7 +353,15 @@ def fetch_search_articles(query_specs: list[dict], lookback_hours: int,
         label = spec.get("label", "")
         query = spec["query"]
         count = spec.get("count", MAX_SEARCH_RESULTS)
-        for r in search_brave(query, lookback_hours, count):
+        try:
+            results = search_brave(query, lookback_hours, count)
+        except RuntimeError as exc:
+            # Auth failure is global, not per-query: the remaining queries
+            # would each burn a request on the same 401. Stop searching and
+            # let the run continue on the RSS pool alone.
+            print(f"Warning: {exc} — skipping the rest of the search stage.")
+            break
+        for r in results:
             total_brave += 1
             norm = normalize_url(r["link"])
             if not norm:
@@ -356,7 +370,7 @@ def fetch_search_articles(query_specs: list[dict], lookback_hours: int,
             if norm in rss_norm_urls or norm in seen_in_search:
                 excl_rss_dedup += 1
                 continue
-            if is_excluded(r["link"], state):
+            if is_excluded(r["link"], state, sent_only):
                 excl_state += 1
                 continue
             if _is_blocked(r):

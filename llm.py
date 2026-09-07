@@ -12,6 +12,7 @@ import os
 import json
 import re
 import datetime
+from typing import NamedTuple
 
 import requests
 
@@ -19,7 +20,7 @@ from config import (
     LLM_BASE_URL, LLM_MODEL, LLM_API_KEY_ENV, LLM_EXTRA,
     LLM_TIMEOUT_SEC,
     MAX_SEARCH_QUERIES, COMPLIANCE_QUERIES, PQC_QUERIES, TOOLING_SCAN_QUERIES,
-    AI_LAB_QUERIES,
+    AI_LAB_QUERIES, MAX_SEARCH_RESULTS, BROAD_SEARCH_RESULTS,
 )
 
 
@@ -159,11 +160,17 @@ def _stack_grounded(item: dict, stack_summary: str) -> bool:
     return bool(quote) and quote.lower() in stack_summary.lower()
 
 
-def parse_triage_output(raw: str) -> list[dict] | None:
+def parse_triage_output(raw: str, stats: dict | None = None) -> list[dict] | None:
     """Returns list of items, or None on skip. Raises RuntimeError on bad JSON.
 
     json_mode is requested on the API call, so the response should not be
     fenced — but strip fences defensively in case a provider regresses.
+
+    Pass a dict as `stats` to learn what the guards below threw away: it gets
+    "returned" (items the model sent) and "dropped" (items the guards
+    rejected). The caller needs both to tell "the model found nothing" from
+    "the model returned only output we refused to trust" — an empty list
+    otherwise looks identical to an editorial skip. Untouched on a skip.
     """
     try:
         data = json.loads(_strip_fences(raw))
@@ -183,23 +190,31 @@ def parse_triage_output(raw: str) -> list[dict] | None:
     # exact stack.txt quote.
     required = ("headline", "category", "severity", "why", "action", "url")
     clean_items = []
+    dropped = 0
     for item in items:
         if not isinstance(item, dict):
+            dropped += 1
             continue
         if not all(item.get(k) for k in required):
             missing = [k for k in required if not item.get(k)]
             print(f"Warning: dropping LLM item missing fields {missing}: "
                   f"{item.get('headline','(no headline)')!r}")
+            dropped += 1
             continue
         if _has_fabricated_cve(item):
             print(f"Warning: dropping LLM item with a malformed CVE reference "
                   f"(hallucination signal): {item.get('headline','(no headline)')!r}")
+            dropped += 1
             continue
         if not _stack_grounded(item, STACK_SUMMARY):
             print(f"Warning: dropping LLM item that failed stack-grounding "
                   f"(no verbatim stack_match quote): {item.get('headline','(no headline)')!r}")
+            dropped += 1
             continue
         clean_items.append(item)
+    if stats is not None:
+        stats["returned"] = len(items)
+        stats["dropped"] = dropped
     return clean_items
 
 
@@ -218,14 +233,22 @@ def _generate_queries(system: str, ask: str, lookback_hours: int, n: int,
         f"Today is {_today_str()}. Lookback window: last {lookback_hours} hours.\n\n"
         f"{ask}"
     )
-    return parse_query_json(call_llm(system, user, temperature=temperature))[:n]
+    try:
+        raw = call_llm(system, user, temperature=temperature)
+    except Exception as exc:
+        # A blip during query generation must not abort the run: the search
+        # stage already tolerates an empty spec list, and the RSS pool is
+        # still worth triaging on its own.
+        print(f"Warning: query generation failed ({exc}); continuing without these queries.")
+        return []
+    return parse_query_json(raw)[:n]
 
 
 # ---------------------------------------------------------------------------
 # Query generation — Pass 1a: anchored to RSS
 # ---------------------------------------------------------------------------
 
-_ANCHORED_QUERY_SYSTEM = f"""You are a security analyst generating targeted web search
+_ANCHORED_QUERY_SYSTEM = f"""You are a security engineer generating targeted web search
 queries to find deeper coverage of stories that appeared in today's RSS feeds.
 
 Stack context (for relevance filtering):
@@ -268,7 +291,11 @@ def generate_anchored_queries(rss_articles: list[dict]) -> list[str]:
         f"coverage of specific stories, CVEs, or campaigns mentioned above — "
         f"or [] if nothing warrants follow-up."
     )
-    raw = call_llm(system, user, temperature=0.2)
+    try:
+        raw = call_llm(system, user, temperature=0.2)
+    except Exception as exc:
+        print(f"Warning: anchored query generation failed ({exc}); continuing without them.")
+        return []
     return parse_query_json(raw)[:ANCHORED_QUERIES]
 
 
@@ -279,7 +306,7 @@ def generate_anchored_queries(rss_articles: list[dict]) -> list[str]:
 # advisories, unfolding incidents. So query generation here targets what's
 # UNFOLDING, not what's newly disclosed or cataloged.
 
-_INDEPENDENT_QUERY_SYSTEM = f"""You are a senior security analyst doing a morning
+_INDEPENDENT_QUERY_SYSTEM = f"""You are a security engineer doing a morning
 horizon-scan. The goal is to find security events that are ACTIVELY UNFOLDING
 right now and that RSS feeds may have missed or underreported.
 
@@ -311,40 +338,14 @@ Rules:
 - Return ONLY a JSON array of strings. No preamble. No explanation. No markdown fences."""
 
 
-def generate_independent_queries(lookback_hours: int) -> list[str]:
-    system = _INDEPENDENT_QUERY_SYSTEM.replace("{n}", str(INDEPENDENT_QUERIES))
-    ask = (
-        f"Generate {INDEPENDENT_QUERIES} search queries targeting security events "
-        f"that are actively unfolding right now."
-    )
-    return _generate_queries(system, ask, lookback_hours,
-                             INDEPENDENT_QUERIES, temperature=0.4)
+# Kept separate from the urgency-biased independent slot so platform/research
+# stories (a cloud provider's new supply-chain capability, a security
+# architecture deep-dive from an engineering blog) get a dedicated search slot
+# rather than competing against fire-tier urgency signals.
 
-
-# ---------------------------------------------------------------------------
-# Query generation — Pass 1c: slow-moving categories (compliance + PQC)
-# ---------------------------------------------------------------------------
-# Both categories are slow-moving and prompt-similar enough to share an LLM
-# call. Returns (compliance_queries, pqc_queries) parsed from a single
-# structured response.
-
-with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompt_slow_queries.txt")) as _f:
-    _SLOW_QUERY_SYSTEM = _f.read().strip()
-
-
-def generate_tooling_scan_queries(lookback_hours: int) -> list[str]:
-    """Generate queries targeting cloud/CI/CD platform features and engineering
-    security write-ups.
-
-    Separate from the urgency-biased independent queries so that platform/research
-    stories (e.g. a major cloud provider's new supply-chain capability, a security
-    architecture deep-dive from an engineering blog) get a dedicated search slot
-    rather than competing against fire-tier urgency signals. AI lab capability
-    releases have their own slot — see generate_ai_lab_queries.
-    """
-    system = f"""You are a product security analyst generating {TOOLING_SCAN_QUERIES} web search
+_TOOLING_SCAN_QUERY_SYSTEM = f"""You are a product security engineer generating {{n}} web search
 query to surface notable new security tooling or platform capabilities published
-in the last {lookback_hours} hours.
+in the last {{lookback_hours}} hours.
 
 Stack context (for relevance filtering):
 {STACK_SUMMARY}
@@ -374,14 +375,8 @@ groups. Operator-stuffed queries degrade into evergreen index/landing pages
 (vendor homepages, blog roots, release-note indexes) instead of articles. Write
 one plain natural-language query; recency is handled by the search engine.
 
-Return ONLY a JSON array of exactly {TOOLING_SCAN_QUERIES} query string(s).
+Return ONLY a JSON array of exactly {{n}} query string(s).
 No preamble. No explanation. No markdown fences."""
-    ask = (
-        f"Generate {TOOLING_SCAN_QUERIES} search query targeting notable new platform "
-        f"security capabilities or engineering security write-ups in this window."
-    )
-    return _generate_queries(system, ask, lookback_hours,
-                             TOOLING_SCAN_QUERIES, temperature=0.3)
 
 
 # ---------------------------------------------------------------------------
@@ -389,19 +384,13 @@ No preamble. No explanation. No markdown fences."""
 # ---------------------------------------------------------------------------
 # Carved out from the tooling-scan slot because a single query trying to cover
 # both general platform tooling AND major AI lab releases ended up surfacing
-# neither reliably. Anthropic Claude Mythos (May 2026) was the trigger.
+# neither reliably. Anthropic Claude Mythos (May 2026) was the trigger. The
+# labs are named in the prompt so the generator anchors on them instead of
+# producing generic "AI security" queries that surface nothing specific.
 
-def generate_ai_lab_queries(lookback_hours: int) -> list[str]:
-    """Generate queries targeting new security-relevant capability releases
-    from major AI labs.
-
-    Named labs (Anthropic, OpenAI, Google DeepMind, xAI, Meta AI, Mistral)
-    are listed so the query generator anchors on them rather than producing
-    generic "AI security" queries that fail to surface specific releases.
-    """
-    system = f"""You are a product security analyst generating {AI_LAB_QUERIES} web search
+_AI_LAB_QUERY_SYSTEM = f"""You are a product security engineer generating {{n}} web search
 query to surface new SECURITY-RELEVANT capability releases from major AI labs in
-the last {lookback_hours} hours.
+the last {{lookback_hours}} hours.
 
 In-scope labs: Anthropic, OpenAI, Google DeepMind, xAI, Meta AI, Mistral AI.
 
@@ -428,7 +417,7 @@ Do NOT target:
 - Generic "AI in security" trend pieces
 
 Rules:
-- Generate exactly {AI_LAB_QUERIES} query
+- Generate exactly {{n}} query
 - Anchor the query on one or more named labs above — generic "AI security
   capability" queries do not surface specific releases reliably
 - Wrap multi-word exact concepts in double quotes so the search engine matches
@@ -437,14 +426,61 @@ Rules:
   lab names — pick the one or two labs most likely to have news and write a
   plain query. Operator-stuffed queries pull index pages, not articles
 - Do NOT append dates or years — recency is handled by the search engine
-- Return ONLY a JSON array of {AI_LAB_QUERIES} query string(s). No preamble.
+- Return ONLY a JSON array of {{n}} query string(s). No preamble.
   No explanation. No markdown fences."""
-    ask = (
-        f"Generate {AI_LAB_QUERIES} search query targeting new security-relevant "
-        f"capability releases from major AI labs in this window."
-    )
+
+
+# ---------------------------------------------------------------------------
+# Query generation — horizon-scan slot table
+# ---------------------------------------------------------------------------
+# These slots differ only in prompt, count, temperature, how the ask sentence
+# ends, and how many Brave results each query is worth — so they are a table,
+# not three near-identical functions. The anchored slot (needs the RSS pool)
+# and the slow-beat pair (one call, two lists) keep their own functions.
+
+class QuerySlot(NamedTuple):
+    label: str        # attribution tag, carried through to the SKIP report
+    system: str       # prompt carrying {n} / {lookback_hours} placeholders
+    n_queries: int    # queries to ask for, and the cap on what's parsed back
+    temperature: float
+    target: str       # completes "Generate N search quer(y|ies) targeting ..."
+    n_results: int    # Brave results fetched per query from this slot
+
+
+QUERY_SLOTS = (
+    QuerySlot("independent", _INDEPENDENT_QUERY_SYSTEM, INDEPENDENT_QUERIES, 0.4,
+              "security events that are actively unfolding right now",
+              BROAD_SEARCH_RESULTS),
+    QuerySlot("tooling-scan", _TOOLING_SCAN_QUERY_SYSTEM, TOOLING_SCAN_QUERIES, 0.3,
+              "notable new platform security capabilities or engineering security "
+              "write-ups in this window",
+              MAX_SEARCH_RESULTS),
+    QuerySlot("ai-lab", _AI_LAB_QUERY_SYSTEM, AI_LAB_QUERIES, 0.3,
+              "new security-relevant capability releases from major AI labs in this window",
+              MAX_SEARCH_RESULTS),
+)
+
+
+def generate_slot_queries(slot: QuerySlot, lookback_hours: int) -> list[str]:
+    """Generate one slot's queries. Returns [] on any LLM or parse failure."""
+    system = (slot.system
+              .replace("{n}", str(slot.n_queries))
+              .replace("{lookback_hours}", str(lookback_hours)))
+    ask = (f"Generate {slot.n_queries} search "
+           f"quer{'y' if slot.n_queries == 1 else 'ies'} targeting {slot.target}.")
     return _generate_queries(system, ask, lookback_hours,
-                             AI_LAB_QUERIES, temperature=0.3)
+                             slot.n_queries, temperature=slot.temperature)
+
+
+# ---------------------------------------------------------------------------
+# Query generation — Pass 1c: slow-moving categories (compliance + PQC)
+# ---------------------------------------------------------------------------
+# Both categories are slow-moving and prompt-similar enough to share an LLM
+# call. Returns (compliance_queries, pqc_queries) parsed from a single
+# structured response.
+
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompt_slow_queries.txt")) as _f:
+    _SLOW_QUERY_SYSTEM = _f.read().strip()
 
 
 def generate_slow_queries(lookback_hours: int) -> tuple[list[str], list[str]]:
@@ -457,7 +493,11 @@ def generate_slow_queries(lookback_hours: int) -> tuple[list[str], list[str]]:
         f"Generate exactly {COMPLIANCE_QUERIES} compliance/policy "
         f"and {PQC_QUERIES} post-quantum cryptography queries."
     )
-    raw = call_llm(_SLOW_QUERY_SYSTEM, user, temperature=0.3, json_mode=True)
+    try:
+        raw = call_llm(_SLOW_QUERY_SYSTEM, user, temperature=0.3, json_mode=True)
+    except Exception as exc:
+        print(f"Warning: slow-beat query generation failed ({exc}); continuing without them.")
+        return [], []
     try:
         data = json.loads(_strip_fences(raw))
     except json.JSONDecodeError:
@@ -507,7 +547,7 @@ def build_triage_input(articles: list[dict]) -> str:
 
 _ENRICH_FIELD_MAX_CHARS = 600  # cap rewritten fields; render escapes, this bounds size
 
-_ENRICH_SYSTEM = f"""You are a senior product security analyst refining one item
+_ENRICH_SYSTEM = f"""You are a product security engineer refining one item
 of a security digest before it is emailed.
 
 Stack context:
