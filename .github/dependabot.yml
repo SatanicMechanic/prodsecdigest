@@ -1,16 +1,16 @@
 version: 2
 
-# Cooldown mitigates supply-chain attacks: a new release must "age" 3 days
-# before Dependabot proposes the bump. If a compromised version is caught
-# and yanked within that window, the malicious release never reaches our PRs.
+# No `cooldown:` key on purpose. Since 2026-07-14 Dependabot applies a 3-day
+# default cooldown to version updates on every ecosystem, with no config — so
+# setting `default-days: 2` would SHORTEN it and `3` merely restates it. Set
+# this key only to ask for longer than 3 days. Security updates are exempt and
+# still open immediately, which is what you want.
 
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-    cooldown:
-      default-days: 3
     commit-message:
       prefix: "ci"
 
@@ -18,7 +18,5 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    cooldown:
-      default-days: 3
     commit-message:
       prefix: "deps"
