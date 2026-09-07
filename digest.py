@@ -210,7 +210,7 @@ def run() -> None:
     # blind the afternoon run to an actual fire. The bar is deliberately much
     # higher: threats only, critical only, at most one item.
     #
-    # Both scheduled runs (11:00 and 23:00 UTC) fall on the same UTC date, so
+    # Both scheduled runs (10:37 and 22:43 UTC) fall on the same UTC date, so
     # date-equality is a sound check; revisit if the schedule changes.
     emergency = sent_today(state)
     if emergency:

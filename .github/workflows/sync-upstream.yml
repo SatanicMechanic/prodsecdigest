@@ -17,8 +17,9 @@ name: Sync from upstream
 
 on:
   schedule:
-    # Mondays 08:00 UTC — ahead of the 11:00 UTC Monday digest run.
-    - cron: '0 8 * * 1'
+    # Mondays 08:23 UTC — ahead of the 10:37 UTC Monday digest run, and
+    # off-round because the top of the hour is the most contended slot.
+    - cron: '23 8 * * 1'
   workflow_dispatch:
 
 permissions:

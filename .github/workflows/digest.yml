@@ -2,10 +2,15 @@ name: Need to Know
 
 on:
   schedule:
-    # 10:55 UTC = 03:55 PDT (UTC-7) / 02:55 PST (UTC-8), weekdays only
-    - cron: '55 10 * * 1-5'
-    # 22:55 UTC = 15:55 PDT / 14:55 PST — catches breaking news; skips if morning already sent
-    - cron: '55 22 * * 1-5'
+    # Off-round minutes on purpose: GitHub queues scheduled workflows and the
+    # top of the hour (and other round values) is the most contended slot, so
+    # a :00 or :30 cron is the most likely to be delayed or dropped.
+    #
+    # 10:37 UTC = 03:37 PDT (UTC-7) / 02:37 PST (UTC-8), weekdays only
+    - cron: '37 10 * * 1-5'
+    # 22:43 UTC = 15:43 PDT / 14:43 PST — the emergency re-check; sends only a
+    # new critical threat if the morning run already delivered.
+    - cron: '43 22 * * 1-5'
   workflow_dispatch:
 
 # Read-only: this job never commits or pushes. Its only writes are the

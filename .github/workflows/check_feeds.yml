@@ -2,8 +2,9 @@ name: Feed Health Check
 
 on:
   schedule:
-    # Weekly, Sundays at 15:00 UTC
-    - cron: '0 15 * * 0'
+    # Weekly, Sundays at 15:17 UTC (off-round: the top of the hour is the
+    # most contended scheduling slot on Actions)
+    - cron: '17 15 * * 0'
   workflow_dispatch:
 
 permissions:
