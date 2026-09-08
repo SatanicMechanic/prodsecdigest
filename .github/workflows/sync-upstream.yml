@@ -37,11 +37,21 @@ jobs:
 
     steps:
       # First step so it instruments the whole job — this is the only job that
-      # executes freshly-merged upstream code (the pytest gate below).
-      - name: Harden runner (egress audit)
+      # executes freshly-merged upstream code (the pytest gate below). Block,
+      # not audit: a missing endpoint just fails this scheduled job loudly
+      # (GitHub emails on failure, nothing pushed) — no silent bypass risk.
+      - name: Harden runner (egress block)
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
         with:
-          egress-policy: audit
+          egress-policy: block
+          # List built from a real captured audit run (digest.yml, same
+          # checkout/setup-uv/uv steps), not guessed statically.
+          allowed-endpoints: >
+            github.com:443
+            raw.githubusercontent.com:443
+            releases.astral.sh:443
+            pypi.org:443
+            files.pythonhosted.org:443
 
       # persist-credentials off: the test step below executes freshly-merged
       # upstream code, which must not have a push-capable token in reach.
