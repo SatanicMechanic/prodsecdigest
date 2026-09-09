@@ -347,7 +347,7 @@ def _post_payload(mock_post):
 def test_call_llm_succeeds(monkeypatch):
     monkeypatch.setenv(llm.LLM_API_KEY_ENV, "tok")
     mock_post = _make_mock_post("result")
-    with mock.patch("llm.requests.post", mock_post):
+    with mock.patch.object(llm._SESSION, "post", mock_post):
         result = llm.call_llm("sys", "user")
     assert result == "result"
     mock_post.assert_called_once()
@@ -360,7 +360,7 @@ def test_call_llm_extracts_text_from_chunked_content(monkeypatch):
         {"type": "text", "text": "result"},
     ]
     mock_post = _make_mock_post(chunks)
-    with mock.patch("llm.requests.post", mock_post):
+    with mock.patch.object(llm._SESSION, "post", mock_post):
         result = llm.call_llm("sys", "user")
     assert result == "result"
 
@@ -370,7 +370,7 @@ def test_call_llm_merges_llm_extra_into_payload(monkeypatch):
     monkeypatch.setenv(llm.LLM_API_KEY_ENV, "tok")
     monkeypatch.setattr(llm, "LLM_EXTRA", '{"reasoning_effort": "low"}')
     mock_post = _make_mock_post()
-    with mock.patch("llm.requests.post", mock_post):
+    with mock.patch.object(llm._SESSION, "post", mock_post):
         llm.call_llm("sys", "user")
     assert _post_payload(mock_post).get("reasoning_effort") == "low"
 
@@ -379,7 +379,7 @@ def test_call_llm_omits_extra_when_llm_extra_empty(monkeypatch):
     monkeypatch.setenv(llm.LLM_API_KEY_ENV, "tok")
     monkeypatch.setattr(llm, "LLM_EXTRA", "{}")
     mock_post = _make_mock_post()
-    with mock.patch("llm.requests.post", mock_post):
+    with mock.patch.object(llm._SESSION, "post", mock_post):
         llm.call_llm("sys", "user")
     assert "reasoning_effort" not in _post_payload(mock_post)
 
@@ -387,7 +387,7 @@ def test_call_llm_omits_extra_when_llm_extra_empty(monkeypatch):
 def test_call_llm_sets_json_mode(monkeypatch):
     monkeypatch.setenv(llm.LLM_API_KEY_ENV, "tok")
     mock_post = _make_mock_post()
-    with mock.patch("llm.requests.post", mock_post):
+    with mock.patch.object(llm._SESSION, "post", mock_post):
         llm.call_llm("sys", "user", json_mode=True)
     assert _post_payload(mock_post).get("response_format") == {"type": "json_object"}
 
@@ -397,7 +397,7 @@ def test_call_llm_raises_http_error_on_bad_status(monkeypatch):
     monkeypatch.setenv("GH_MODELS_TOKEN", "tok")
     mock_response = mock.MagicMock()
     mock_response.raise_for_status.side_effect = Exception("HTTP 500")
-    with mock.patch("llm.requests.post", return_value=mock_response), \
+    with mock.patch.object(llm._SESSION, "post", return_value=mock_response), \
          pytest.raises(Exception):
         llm.call_llm("sys", "user")
 
@@ -464,3 +464,26 @@ def test_stats_untouched_on_skip(monkeypatch):
 def test_stats_argument_stays_optional(monkeypatch):
     monkeypatch.setattr(llm, "STACK_SUMMARY", "CI/CD & SCM: GitHub")
     assert len(llm.parse_triage_output(json.dumps({"items": [_valid()]}))) == 1
+
+
+# --- transport retries ---
+
+def test_chat_completion_retries_read_timeout(monkeypatch):
+    """A single upstream read timeout must not kill the run."""
+    import requests
+
+    ok = mock.Mock(status_code=200)
+    ok.json.return_value = {"choices": [{"message": {"content": "hi"}}]}
+    post = mock.Mock(side_effect=[requests.exceptions.ReadTimeout("boom"), ok])
+    # urllib3 does the real retrying inside the adapter; assert the policy is
+    # mounted and that a retried call still returns, using Session.post as the
+    # stand-in for the adapter's transport.
+    monkeypatch.setattr(llm._SESSION, "post", post)
+
+    retry = llm._SESSION.get_adapter("https://x/").max_retries
+    assert "POST" in retry.allowed_methods
+    assert retry.total == 2
+
+    with pytest.raises(requests.exceptions.ReadTimeout):
+        llm._chat_completion("https://x", "k", "m", "s", "u", 0.1, False)
+    assert llm._chat_completion("https://x", "k", "m", "s", "u", 0.1, False) == "hi"

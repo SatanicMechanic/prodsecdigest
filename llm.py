@@ -3,9 +3,10 @@ triage output parser.
 
 Plain requests against the chat-completions API — the endpoints are
 OpenAI-compatible and we only ever need one blocking call, so the SDK
-(httpx/pydantic tree) isn't worth the dependency. call_llm retries by
-falling back from the primary provider to GitHub Models on any error.
-The primary provider is configured entirely by env (see config.py).
+(httpx/pydantic tree) isn't worth the dependency. Transient failures are
+retried by the urllib3 adapter on _SESSION; anything that survives that is
+raised to the caller. The provider is configured entirely by env (see
+config.py).
 """
 
 import os
@@ -15,6 +16,8 @@ import datetime
 from typing import NamedTuple
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from config import (
     LLM_BASE_URL, LLM_MODEL, LLM_API_KEY_ENV, LLM_EXTRA,
@@ -50,6 +53,20 @@ INDEPENDENT_QUERIES = MAX_SEARCH_QUERIES - ANCHORED_QUERIES
 # LLM clients
 # ---------------------------------------------------------------------------
 
+# A read timeout on a single call kills the whole run (2026-09-09: Mistral
+# timed out on the first query-generation call and the digest never sent).
+# POST is not in urllib3's default allowed_methods because retrying a
+# non-idempotent request can double a side effect — a chat completion has none
+# beyond token spend, so retrying is safe here.
+_SESSION = requests.Session()
+_SESSION.mount("https://", HTTPAdapter(max_retries=Retry(
+    total=2,
+    backoff_factor=2,
+    allowed_methods={"POST"},
+    status_forcelist=(429, 500, 502, 503, 504),
+)))
+
+
 def _chat_completion(base_url: str, api_key: str, model: str,
                      system_prompt: str, user_message: str,
                      temperature: float, json_mode: bool,
@@ -65,7 +82,7 @@ def _chat_completion(base_url: str, api_key: str, model: str,
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
-    resp = requests.post(
+    resp = _SESSION.post(
         f"{base_url}/chat/completions",
         headers={"Authorization": f"Bearer {api_key}"},
         json=payload,

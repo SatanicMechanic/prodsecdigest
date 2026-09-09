@@ -6,8 +6,12 @@ on:
     # top of the hour (and other round values) is the most contended slot, so
     # a :00 or :30 cron is the most likely to be delayed or dropped.
     #
-    # 10:37 UTC = 03:37 PDT (UTC-7) / 02:37 PST (UTC-8), weekdays only
-    - cron: '37 10 * * 1-5'
+    # Nominally 23:37 PDT the *previous* evening — shifted 4h early on purpose.
+    # Since 2026-08-27 GitHub's scheduler has run 3.7-5.2h behind on this slot
+    # (evening slot below is only ~1.7h behind, so it is left alone), which
+    # lands this at ~03:20-04:50 PDT. If the drift goes away it fires the night
+    # before; restore to '37 10' at that point.
+    - cron: '37 06 * * 1-5'
     # 22:43 UTC = 15:43 PDT / 14:43 PST — the emergency re-check; sends only a
     # new critical threat if the morning run already delivered.
     - cron: '43 22 * * 1-5'
