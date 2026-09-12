@@ -230,8 +230,8 @@ def render_html(items: list[dict], date_str: str) -> str:
                 <tr>
                   <td style="font-family:{_MONO}; font-size:21px; font-weight:700;
                              letter-spacing:-0.01em;">
-                    <span style="color:{_AMBER};">n2k</span><span
-                          style="color:{_TEXT};">secdigest</span>
+                    <span style="color:{_AMBER};">prodsec</span><span
+                          style="color:{_TEXT};">digest</span>
                   </td>
                   <td align="right" style="font-family:{_MONO}; font-size:12px;
                                            letter-spacing:0.1em; text-transform:uppercase;

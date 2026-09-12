@@ -1,7 +1,7 @@
-! name: n2ksecdigest security news
-! description: Boosts primary-source security news, vendor advisories, and research blogs; downranks aggregator and trending-news backfill. Used by the n2ksecdigest Brave Search pass.
+! name: prodsecdigest security news
+! description: Boosts primary-source security news, vendor advisories, and research blogs; downranks aggregator and trending-news backfill. Used by the prodsecdigest Brave Search pass.
 ! public: true
-! author: n2ksecdigest
+! author: prodsecdigest
 
 ! To use: host this file at a publicly reachable raw URL (the public GitHub
 ! repo works: https://raw.githubusercontent.com/<owner>/<repo>/main/security-news.goggle)

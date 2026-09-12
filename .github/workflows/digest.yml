@@ -35,7 +35,7 @@ jobs:
     # This repo is a template — inert here, active in private mirrors. Without
     # this the schedule fires twice daily upstream with no secrets and no
     # LLM_MODEL, failing every run.
-    if: github.repository != 'SatanicMechanic/n2ksecdigest'
+    if: github.repository != 'SatanicMechanic/prodsecdigest'
 
     steps:
       - name: Checkout

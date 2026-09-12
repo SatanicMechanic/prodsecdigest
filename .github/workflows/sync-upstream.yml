@@ -26,14 +26,14 @@ permissions:
   contents: write
 
 env:
-  UPSTREAM_REPO: SatanicMechanic/n2ksecdigest
+  UPSTREAM_REPO: SatanicMechanic/prodsecdigest
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # No-op on the upstream repo itself.
-    if: github.repository != 'SatanicMechanic/n2ksecdigest'
+    if: github.repository != 'SatanicMechanic/prodsecdigest'
 
     steps:
       # persist-credentials off: the test step below executes freshly-merged

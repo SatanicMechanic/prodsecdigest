@@ -1,8 +1,8 @@
-# n2ksecdigest
+# prodsecdigest
 
 > **This repo is a template and does not run.** Every scheduled workflow is gated off this repository; the bot only starts working once you mirror it and configure your own copy ([§3](#3-stack-description-and-why-you-want-a-private-fork)). `stack.txt` and `feeds.md` ship as starter content for you to replace.
 
-Automated product-security news digest. Runs on GitHub Actions twice each weekday, fetches from RSS and web search, triages through any OpenAI-compatible LLM provider (**GitHub Models by default — no third-party account needed**; presets also cover xAI, Mistral, OpenAI, Groq, OpenRouter, Together, DeepSeek, and Ollama, and you pick the model) against a **news-cycle fire-tier bar**, and emails a short digest via Resend.
+Automated product-security news digest. Runs on GitHub Actions twice each weekday, fetches from RSS and web search, triages through any OpenAI-compatible LLM provider; presets cover github models, xAI, Mistral, OpenAI, Groq, OpenRouter, Together, DeepSeek, and Ollama, and you pick the model) against a **news-cycle fire-tier bar**, and emails a short digest via Resend.
 
 ## Should you actually use this?
 
@@ -33,7 +33,7 @@ Typical output: **0–2 items per day**, delivered as an email a bit more than h
 
 ### Where it fits alongside weekly newsletters
 
-This bot is complementary to — not a replacement for — weekly digests like [SANS NewsBites](https://www.sans.org/newsletters/newsbites/) and [tl;dr sec](https://tldrsec.com/). Those give you breadth, analysis, and tooling round-ups on a weekly cadence; this bot covers the narrow gap they can't: **same-day notice of the handful of events that shouldn't wait for Friday** — active exploitation of something in your stack, an emergency advisory, an unfolding supply-chain compromise. Read the newsletters for depth; let this interrupt you only when the news cycle says now.
+This bot is complementary to — not a replacement for — weekly digests like [SANS NewsBites](https://www.sans.org/newsletters/newsbites/) and [tl;dr sec](https://tldrsec.com/). Those give you breadth, analysis, and tooling round-ups on a weekly cadence; this bot covers the narrow gap they can't: **same-day notice of the handful of events that shouldn't wait for Friday** — active exploitation of something in your stack, an emergency advisory, an unfolding supply-chain compromise, and other bits that are specifically relevant to your stack. Read the newsletters for depth; let this interrupt you only when the news cycle says now.
 
 ## Pipeline
 
@@ -103,7 +103,7 @@ Two related boundaries worth knowing: outbound article fetches are restricted to
 
 ## Setup
 
-**This repo is a template and is inert.** `digest.yml`, `check_feeds.yml`, and `sync-upstream.yml` are all gated on `github.repository != 'SatanicMechanic/n2ksecdigest'`, so nothing scheduled runs here at all. They activate automatically in your fork or private mirror.
+**This repo is a template and is inert.** `digest.yml`, `check_feeds.yml`, and `sync-upstream.yml` are all gated on `github.repository != 'SatanicMechanic/prodsecdigest'`, so nothing scheduled runs here at all. They activate automatically in your fork or private mirror.
 
 **Which means: in your copy they start running on GitHub's schedule immediately**, using *your* repo's secrets — that's by design (§3 below is written for you). Until you finish this Setup section, `digest.yml` fails fast on every scheduled run (deliberately — it refuses to run without a `stack.txt` and an `LLM_MODEL`; see [§3](#3-stack-description-and-why-you-want-a-private-fork)). If you're not ready to configure it yet, disable Actions under Settings → Actions until you are; otherwise GitHub auto-disables a fork's scheduled workflows after 60 days with no repo activity.
 
@@ -112,8 +112,8 @@ Two related boundaries worth knowing: outbound article fetches are restricted to
 Requires [uv](https://docs.astral.sh/uv/) — replaces `pip` + `venv`. Install with `curl -LsSf https://astral.sh/uv/install.sh | sh` or your platform's package manager.
 
 ```
-git clone git@github.com:SatanicMechanic/n2ksecdigest.git
-cd n2ksecdigest
+git clone git@github.com:SatanicMechanic/prodsecdigest.git
+cd prodsecdigest
 uv venv --python 3.12
 source .venv/bin/activate
 uv pip install -r requirements.txt -r requirements-dev.txt
@@ -168,14 +168,14 @@ A real stack description is reconnaissance gold: products, cloud providers, base
 
 ```
 # GitHub can't make a private fork of a public repo, so mirror instead:
-git clone --bare git@github.com:SatanicMechanic/n2ksecdigest.git
-cd n2ksecdigest.git
+git clone --bare git@github.com:SatanicMechanic/prodsecdigest.git
+cd prodsecdigest.git
 git push --mirror git@github.com:YOU/your-private-repo.git
-cd .. && rm -rf n2ksecdigest.git
+cd .. && rm -rf prodsecdigest.git
 
 git clone git@github.com:YOU/your-private-repo.git
 cd your-private-repo
-git remote add upstream git@github.com:SatanicMechanic/n2ksecdigest.git
+git remote add upstream git@github.com:SatanicMechanic/prodsecdigest.git
 ```
 
 Then edit `stack.txt` with your real stack and commit — in the private repo this is safe and is the single source of truth for both local runs and CI. To pull upstream updates (dependency bumps, Actions pin bumps), either run `git fetch upstream && git merge upstream/main` manually, or rely on the included `sync-upstream.yml` workflow: it merges upstream weekly, runs the test suite as a gate, and pushes only if green (inert on this public repo; active in your mirror). One setup note: the built-in Actions token cannot push changes to workflow files, so syncs that include `.github/workflows/` changes need a fine-grained PAT (your mirror only; Contents + Workflows read/write) stored as a `SYNC_TOKEN` secret — without it, the sync works until a workflow file changes upstream, then fails loudly. Your `stack.txt` edit lives on a private commit; merges only conflict if the upstream template itself changes.
@@ -228,7 +228,7 @@ Most signal tuning lives in `config.py`:
 - `STATE_CANDIDATE_COOLDOWN_DAYS` (5) — how long near-misses are filtered to avoid daily recycling
 - `MAX_SEARCH_QUERIES` (6) — anchored (1) + independent (5) fire-tier queries; `COMPLIANCE_QUERIES` (1) and `PQC_QUERIES` (1) are separate and run only on the Monday catch-up
 - `MAX_SEARCH_RESULTS` (5) / `BROAD_SEARCH_RESULTS` (3) — Brave results fetched per query; abstract query types (independent/compliance/PQC) use the smaller count to shrink trending-news backfill
-- `BRAVE_GOGGLES` (env, optional) — URL of a Brave goggle to bias results toward a curated source set. The repo ships `security-news.goggle` (boosts primary security news/advisories, downranks aggregator backfill). Brave fetches the goggle at query time, so the URL must be publicly reachable — **a private fork's own raw URL won't work**; point at this repo's copy (`https://raw.githubusercontent.com/SatanicMechanic/n2ksecdigest/main/security-news.goggle`), or host a customized goggle at any public URL (a public gist works). Because it must be public, keep customizations generic — don't encode stack hints. Boost-only by design; hard exclusions stay in the testable `config.py` blocklists
+- `BRAVE_GOGGLES` (env, optional) — URL of a Brave goggle to bias results toward a curated source set. The repo ships `security-news.goggle` (boosts primary security news/advisories, downranks aggregator backfill). Brave fetches the goggle at query time, so the URL must be publicly reachable — **a private fork's own raw URL won't work**; point at this repo's copy (`https://raw.githubusercontent.com/SatanicMechanic/prodsecdigest/main/security-news.goggle`), or host a customized goggle at any public URL (a public gist works). Because it must be public, keep customizations generic — don't encode stack hints. Boost-only by design; hard exclusions stay in the testable `config.py` blocklists
 - `LLM_TIMEOUT_SEC` (60) — per-provider request budget; the digest gives each parallel triage future twice this plus slack before timing out
 
 The triage bars live in `prompt_threat.txt` (fire-tier threats + compliance) and `prompt_tooling.txt` (platform/CI/CD/OSS-tool features). Tuning what qualifies is a prompt edit, not a code change. Slot caps (`TRIAGE_GLOBAL_CAP`, `TRIAGE_TOOLING_CAP`) are in `config.py`.
@@ -248,9 +248,9 @@ v1.2.0 tried committing the **sent** subset back to the repo as a durability bac
 
 ## Costs
 
-Anywhere from **free to about $0.60/month**, depending on your choice of provider and model. Everything except the LLM is free at this volume:
+Anywhere from **free to about $0.60/month**, depending on your choice of provider and model. Everything is potentially free at this volume:
 
-- LLM provider: free on the default (GitHub Models, within its free tier), up to roughly $0.60/month on a paid frontier model. Volume is small either way — 5–6 query/triage calls per run (anchored query when warranted, independent query, combined compliance+PQC query, tooling-scan, ai-lab, threat + tooling triage in parallel; ~25K tokens), plus up to 3 short enrichment calls on days when items are actually selected (most days: zero). On xAI, reasoning effort is pinned to "low" via `LLM_EXTRA` — enough judgment for triage-style calls without deep-reasoning latency or cost.
+- LLM provider: free on the default (GitHub Models, within its free tier), up to roughly $0.60/month on a paid frontier model. Volume is small either way — 5–6 query/triage calls per run (anchored query when warranted, independent query, combined compliance+PQC query, tooling-scan, ai-lab, threat + tooling triage in parallel; ~25K tokens), plus up to 3 short enrichment calls on days when items are actually selected (most days: zero). 
 - GitHub Actions: ~1 min/run, well within free tier
 - Brave Search: 2,000 queries/month free; this bot uses ~160/month (8 queries/run × ~20 runs)
 - Resend: 3,000 emails/month free; this sends ≤22/month — and typically far fewer given the SKIP-preferred bar
