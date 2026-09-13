@@ -2,20 +2,20 @@
 
 > **This repo is a template and does not run.** Every scheduled workflow is gated off this repository; the bot only starts working once you mirror it and configure your own copy ([§3](#3-stack-description-and-why-you-want-a-private-fork)). `stack.txt` and `feeds.md` ship as starter content for you to replace.
 
-Automated product-security news digest. Runs on GitHub Actions twice each weekday, fetches from RSS and web search, triages through any OpenAI-compatible LLM provider; presets cover github models, xAI, Mistral, OpenAI, Groq, OpenRouter, Together, DeepSeek, and Ollama, and you pick the model) against a **news-cycle fire-tier bar**, and emails a short digest via Resend.
+Product-security news without the noise. On GitHub Actions each weekday it reads RSS and web search, has an LLM judge every candidate against a description of your stack, and emails a short digest via Resend only when something clears the bar. It works with any OpenAI-compatible LLM provider. Presets cover GitHub Models, xAI, Mistral, OpenAI, Groq, OpenRouter, Together, DeepSeek, and Ollama, and you choose the model.
 
-## Should you actually use this?
+## What this is for
 
-For most security engineers, **a well-tuned set of Google News Alerts is the right answer.** A few queries like `"actively exploited" CVE`, `"emergency patch" zero-day`, `"CISA emergency directive"`, `"supply chain compromise" malicious package`, plus vendor-specific terms for your stack, will hit most of the same articles this bot's web-search pass surfaces — for free, with zero maintenance, and no LLM API spend. The cost: significantly more noise (Patch Tuesday recaps, trailing coverage, vendor PR, out-of-scope vulnerabilities) and the same article arriving from 5 different sources. You triage that pile yourself, every day.
+The stories that matter to a product-security team aren't hidden. They show up in feeds, newsletters, and alerts. The problem is what they're buried in: Patch Tuesday recaps, trailing coverage, vendor PR, vulnerabilities in products you don't run, and the same story from five sources. The one item that affects your stack is easy to miss in that pile.
 
-The reason to fork this instead is if you specifically want:
+This digest does the filtering so that anything reaching your inbox is worth reading:
 
-- **The LLM applying the editorial bar**, not you. SKIP-default: no email unless something clears the bar — in practice an email arrives a bit more than half of days, almost always with a single item.
+- **An editorial bar, applied for you.** SKIP is the default: no email unless something clears the bar.
 - **Stack-aware scope filtering.** "Cisco out of scope" and "Microsoft = Windows Server only" don't have to live in your head.
-- **Synthesis, not headlines.** Each item arrives as a rewritten headline + "why this matters to your stack" + "action to take" — 30 seconds of decision, not 5 minutes of reading.
-- **Aggressive dedup + state.** Trailing coverage doesn't recycle for weeks; sent items are suppressed for 30 days.
+- **Synthesis, not headlines.** Each item arrives as a rewritten headline, why it matters to your stack, and what to do about it.
+- **Dedup and state.** Trailing coverage of an event you've already been sent is suppressed, and sent items don't come back for 30 days.
 
-If you're willing to spend 5 minutes a day skimming headlines, Google Alerts wins. If you want 0 minutes of triage at the cost of an LLM doing it on a schedule, this might be worth the setup.
+The trade-off is setup and an LLM doing the judging. It will occasionally miss something or include something marginal, and its judgment is only as good as your `stack.txt`.
 
 ## Design principle
 
@@ -25,15 +25,20 @@ What it surfaces falls into three categories, each held to the same SKIP-preferr
 
 1. **Fire-tier security news** — active mass exploitation, emergency/out-of-cycle advisories, unfolding supply chain compromises, multiple independent sources converging on the same story with urgent framing. Signal the news cycle produces; not signal a catalog produces.
 
-2. **Platform and tooling developments** — notable new capabilities in your stack (cloud, CI/CD, runtimes, security platforms) and noteworthy new open-source security tooling relevant to CI/CD, container security, dependency management, code security, or monitoring. Things worth awareness today, not just eventually.
+2. **Platform and tooling developments** — notable new capabilities in your stack (cloud, CI/CD, runtimes, security platforms), noteworthy new open-source security tooling relevant to CI/CD, container security, dependency management, code security, or monitoring, and security-relevant capability releases from major AI labs.
 
-3. **Compliance and policy changes** — substantive regulatory or policy shifts affecting SaaS and software vendors that a product-security team should be aware of.
+3. **Compliance, policy, and PQC** — substantive regulatory or policy shifts affecting SaaS and software vendors, and post-quantum cryptography developments. These move slowly, so they're searched only on the Monday run.
 
-Typical output: **0–2 items per day**, delivered as an email a bit more than half of days. SKIP is the default on quiet days; 3 items is rare.
+On the author's instance: **0–2 items per digest**, an email a bit more than half of weekdays, almost always a single item. A fork with a different `stack.txt` will behave differently.
+
+### How it runs each day
+
+- **Morning run** — the daily digest, covering all three categories.
+- **Afternoon run** — an emergency re-check. If the morning run already sent something, the afternoon run sends only one *critical* threat, or nothing. It runs only the anchored and independent searches: no tooling-scan or ai-lab queries, no Monday compliance/PQC queries, and no tooling triage. It also ignores the near-miss cooldown so a story that escalated since morning can come back. If the morning run sent nothing, the afternoon run is a normal digest.
 
 ### Where it fits alongside weekly newsletters
 
-This bot is complementary to — not a replacement for — weekly digests like [SANS NewsBites](https://www.sans.org/newsletters/newsbites/) and [tl;dr sec](https://tldrsec.com/). Those give you breadth, analysis, and tooling round-ups on a weekly cadence; this bot covers the narrow gap they can't: **same-day notice of the handful of events that shouldn't wait for Friday** — active exploitation of something in your stack, an emergency advisory, an unfolding supply-chain compromise, and other bits that are specifically relevant to your stack. Read the newsletters for depth; let this interrupt you only when the news cycle says now.
+It complements weekly digests like [SANS NewsBites](https://www.sans.org/newsletters/newsbites/) and [tl;dr sec](https://tldrsec.com/) rather than replacing them. Those are built for breadth: a week of stories, analysis, and tool round-ups, most of which won't touch your stack. Read them for depth. This is the short list filtered to your stack that you shouldn't miss, and it catches the occasional fire the same day.
 
 ## Pipeline
 
@@ -90,6 +95,7 @@ This bot is complementary to — not a replacement for — weekly digests like [
 | `feeds.md` | RSS feed list (markdown links, parsed at import; starter set here — repopulate for your stack) |
 | `security-news.goggle` | Brave goggle boosting curated security sources (opt-in via `BRAVE_GOGGLES`) |
 | `check_feeds.py` | Feed health check (standalone) |
+| `llm_smoke.py` | Manual provider connectivity check — hits the real API; not collected by pytest |
 | `tests/`         | pytest suite |
 
 ## Security model
@@ -111,12 +117,14 @@ Two related boundaries worth knowing: outbound article fetches are restricted to
 
 Requires [uv](https://docs.astral.sh/uv/) — replaces `pip` + `venv`. Install with `curl -LsSf https://astral.sh/uv/install.sh | sh` or your platform's package manager.
 
+Cloning upstream as below is fine for trying it locally. For a real deployment, create the private mirror in [§3](#3-stack-description-and-why-you-want-a-private-fork) first and clone that instead.
+
 ```
 git clone git@github.com:SatanicMechanic/prodsecdigest.git
 cd prodsecdigest
 uv venv --python 3.12
 source .venv/bin/activate
-uv pip install -r requirements.txt -r requirements-dev.txt
+uv pip install --require-hashes -r requirements.txt -r requirements-dev.txt
 ```
 
 Dependencies are compiled, not floor-pinned: edit the `.in` files (direct deps, `>=`) and regenerate the fully-pinned `.txt` files that CI actually installs, so transitive packages can't float to a new release mid-run.
@@ -184,8 +192,8 @@ If `stack.txt` is missing or empty the bot exits with an error rather than silen
 
 ### 4. Repo secrets + variables (for Actions)
 
-**Secrets:** `GH_MODELS_TOKEN`, `RESEND_API_KEY`, `BRAVE_API_KEY` (plus your provider's key if you switch off the default)
-**Variables:** `DIGEST_TO_EMAIL`, `DIGEST_FROM_EMAIL`, `LLM_MODEL` (required), optionally `LLM_PROVIDER` / `LLM_EXTRA`
+**Secrets:** `GH_MODELS_TOKEN`, `RESEND_API_KEY`, `BRAVE_API_KEY` (plus your provider's key if you switch off the default), optionally `SLACK_WEBHOOK_URL`
+**Variables:** `DIGEST_TO_EMAIL`, `DIGEST_FROM_EMAIL`, `LLM_MODEL` (required), optionally `LLM_PROVIDER` / `LLM_EXTRA` / `BRAVE_GOGGLES`
 
 Upgrading to a newer model is editing the `LLM_MODEL` variable — no code change, no commit, and nothing to sync to private mirrors.
 
@@ -196,7 +204,7 @@ Switching provider is two variables and a secret — e.g. `LLM_PROVIDER=mistral`
 ### 5. Local run
 
 ```
-python digest.py
+uv run python digest.py
 ```
 
 Reads `.env` and the committed `stack.txt`, writes `last_run.txt` with the raw LLM output, updates `state.json`.
@@ -204,10 +212,10 @@ Reads `.env` and the committed `stack.txt`, writes `last_run.txt` with the raw L
 ## Tests
 
 ```
-pytest -q
+uv run pytest -q
 ```
 
-Pytest suite covers URL normalization, state TTL semantics, HTML escaping, URL scheme validation, LLM output parsing, triage input formatting, blocklist matching, and triage-merge logic (dedup, slot caps, ordering). CI (`tests.yml`) runs on every push and PR.
+Pytest suite covers URL normalization, state TTL semantics, HTML escaping, URL scheme validation, LLM output parsing, triage input formatting, blocklist matching, feed/search freshness, triage-merge logic (dedup, slot caps, ordering), enrichment, and Slack delivery. CI (`tests.yml`) runs on every push and PR.
 
 ## Feeds
 
@@ -219,9 +227,8 @@ Volume trade-off: this bot gives up Krebs-breaks-a-story first-mover windows (ma
 
 ## Tuning
 
-Most signal tuning lives in `config.py`:
+RSS sources live in `feeds.md` (markdown link list parsed at import). Most other signal tuning lives in `config.py`:
 
-- `feeds.md` — add/remove RSS sources (markdown link list parsed at import)
 - `BLOCKLIST_TITLE_TERMS` / `BLOCKLIST_DOMAINS` / `BLOCKLIST_URL_PATTERNS` — suppress known noise before triage (title match is word-boundary, case-insensitive; URL patterns are full-link regexes that catch evergreen index/price/marketing pages whose host also serves real news)
 - `MAX_RSS_ARTICLES`, `PER_FEED_CAP` — candidate pool shape (round-robin merge enforces per-feed fairness)
 - `STATE_SENT_TTL_DAYS` (30) — how long sent URLs stay suppressed
@@ -229,7 +236,7 @@ Most signal tuning lives in `config.py`:
 - `MAX_SEARCH_QUERIES` (6) — anchored (1) + independent (5) fire-tier queries; `COMPLIANCE_QUERIES` (1) and `PQC_QUERIES` (1) are separate and run only on the Monday catch-up
 - `MAX_SEARCH_RESULTS` (5) / `BROAD_SEARCH_RESULTS` (3) — Brave results fetched per query; abstract query types (independent/compliance/PQC) use the smaller count to shrink trending-news backfill
 - `BRAVE_GOGGLES` (env, optional) — URL of a Brave goggle to bias results toward a curated source set. The repo ships `security-news.goggle` (boosts primary security news/advisories, downranks aggregator backfill). Brave fetches the goggle at query time, so the URL must be publicly reachable — **a private fork's own raw URL won't work**; point at this repo's copy (`https://raw.githubusercontent.com/SatanicMechanic/prodsecdigest/main/security-news.goggle`), or host a customized goggle at any public URL (a public gist works). Because it must be public, keep customizations generic — don't encode stack hints. Boost-only by design; hard exclusions stay in the testable `config.py` blocklists
-- `LLM_TIMEOUT_SEC` (60) — per-provider request budget; the digest gives each parallel triage future twice this plus slack before timing out
+- `LLM_TIMEOUT_SEC` (60) — per-provider request budget; each parallel triage future gets this plus 10 seconds before timing out
 
 The triage bars live in `prompt_threat.txt` (fire-tier threats + compliance) and `prompt_tooling.txt` (platform/CI/CD/OSS-tool features). Tuning what qualifies is a prompt edit, not a code change. Slot caps (`TRIAGE_GLOBAL_CAP`, `TRIAGE_TOOLING_CAP`) are in `config.py`.
 
@@ -242,18 +249,16 @@ The triage bars live in `prompt_threat.txt` (fire-tier threats + compliance) and
 
 URLs are canonicalized before storage: scheme/host lowercased, fragment stripped, tracking params (utm_*, fbclid, gclid, etc.) removed, default ports and trailing slashes dropped. So `https://Example.com/a/?utm_source=x` and `https://example.com/a` collapse.
 
-The cache save step runs with `if: always()` so state is preserved even when the digest is skipped or fails. The 7-day Actions cache eviction window is much longer than the weekday run cadence (twice per weekday), so the cache is never idle long enough to expire and state survives weekends. If the cache is ever evicted, the bot starts fresh — sent/candidate history is lost, so some suppressed items may reappear until they age out.
-
-v1.2.0 tried committing the **sent** subset back to the repo as a durability backstop. It never worked (the commit gate ran `git diff` before staging, which ignores untracked files) and was removed in v1.3.0: `main`'s ruleset requires a PR plus the `test` check, GitHub Actions is not an eligible bypass actor, and the digest job is the one job that must not hold a bypass credential — it installs third-party code, so branch protection is what stops a bad dependency release from pushing to `main`. A repeated story ages out in 30 days; that trade wasn't worth it.
+The cache save step runs with `if: always()` so state is preserved even when the digest is skipped or fails. The 7-day Actions cache eviction window is much longer than the weekday run cadence (twice per weekday), so the cache is never idle long enough to expire and state survives weekends. If the cache is ever evicted, the bot starts fresh — sent/candidate history is lost, so some suppressed items may reappear until they age out. State is deliberately not committed back to the repo: that would need a branch-protection bypass credential in the one job that installs third-party code (see the comment at the end of `digest.yml`).
 
 ## Costs
 
 Anywhere from **free to about $0.60/month**, depending on your choice of provider and model. Everything is potentially free at this volume:
 
-- LLM provider: free on the default (GitHub Models, within its free tier), up to roughly $0.60/month on a paid frontier model. Volume is small either way — 5–6 query/triage calls per run (anchored query when warranted, independent query, combined compliance+PQC query, tooling-scan, ai-lab, threat + tooling triage in parallel; ~25K tokens), plus up to 3 short enrichment calls on days when items are actually selected (most days: zero). 
+- LLM provider: free on the default (GitHub Models, within its free tier), up to roughly $0.60/month on a paid frontier model. Volume is small either way. A morning run makes 6 query/triage calls (anchored when warranted, independent, tooling-scan, ai-lab, then threat + tooling triage in parallel; ~25K tokens), and Mondays add one combined compliance+PQC call. An afternoon re-check after a morning send makes 3 calls. Add up to 3 short enrichment calls when items are selected.
 - GitHub Actions: ~1 min/run, well within free tier
-- Brave Search: 2,000 queries/month free; this bot uses ~160/month (8 queries/run × ~20 runs)
-- Resend: 3,000 emails/month free; this sends ≤22/month — and typically far fewer given the SKIP-preferred bar
+- Brave Search: roughly 300 queries/month (8 per morning run, 10 on Mondays, 6 per afternoon re-check, ~44 runs). Check Brave's current plan limits.
+- Resend: 3,000 emails/month free; this sends ≤44/month (one per run at most), and typically far fewer given the SKIP-preferred bar
 - All RSS feeds: no auth required
 
 The author's own instance currently runs at **$0/month**, using `mistral-medium-latest` on Mistral's free tier.
@@ -262,8 +267,8 @@ The author's own instance currently runs at **$0/month**, using `mistral-medium-
 
 - **All feeds dead**: RSS pool empty; search-only digest if queries still generate; SKIP if nothing found
 - **Brave Search down / key missing**: `fetch_search_articles` returns empty, RSS-only digest
-- **LLM provider down**: query gen / triage raise; if both triage calls fail the digest is skipped and state is still persisted. There is no fallback provider — a failed run means no digest that cycle
-- **Triage hangs**: each future is bounded by `2 * LLM_TIMEOUT_SEC + 10` seconds so the workflow doesn't sit until the 10‑minute job timeout
+- **LLM provider down**: query generation logs a warning and continues with no queries for that slot. If every triage call fails, state is persisted and the run raises, so the Actions run goes red and GitHub's failure notification fires. There is no fallback provider — a failed run means no digest that cycle
+- **Triage hangs**: each future is bounded by `LLM_TIMEOUT_SEC + 10` seconds so the workflow doesn't sit until the 10‑minute job timeout
 - **Enrichment fetch/LLM failure**: per-item and best-effort; the digest ships with the triage-time why/action
 - **Resend 4xx/5xx**: raises; state is not updated, so the next run will re-consider the same articles
 - **Slack webhook down / URL missing**: logged and ignored; email delivery (the delivery of record) is unaffected
