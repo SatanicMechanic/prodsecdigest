@@ -2,6 +2,8 @@
 
 from unittest import mock
 
+import pytest
+
 import slack
 
 
@@ -35,3 +37,10 @@ def test_send_slack_failure_is_non_fatal(monkeypatch):
     monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/x")
     with mock.patch.object(slack.requests, "post", side_effect=slack.requests.RequestException("down")):
         slack.send_slack({"text": "x"})  # must not raise
+
+
+def test_send_slack_failure_raises_when_fatal(monkeypatch):
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/x")
+    with mock.patch.object(slack.requests, "post", side_effect=slack.requests.RequestException("down")):
+        with pytest.raises(slack.requests.RequestException):
+            slack.send_slack({"text": "x"}, fatal=True)

@@ -38,11 +38,19 @@ from slack import send_slack
 load_dotenv()
 
 
-# Required env vars: the run cannot send a digest without these. The LLM key is
-# whichever one the configured provider uses — hardcoding XAI_API_KEY here meant
-# every non-xAI provider still demanded an unused xAI key.
-_REQUIRED_ENV = (LLM_API_KEY_ENV, "RESEND_API_KEY",
-                 "DIGEST_TO_EMAIL", "DIGEST_FROM_EMAIL")
+# Required env vars. The LLM key is whichever one the configured provider uses —
+# hardcoding XAI_API_KEY here meant every non-xAI provider still demanded an
+# unused xAI key. Delivery is email, Slack, or both; see _check_env.
+_REQUIRED_ENV = (LLM_API_KEY_ENV,)
+_EMAIL_ENV = ("RESEND_API_KEY", "DIGEST_TO_EMAIL", "DIGEST_FROM_EMAIL")
+
+
+def _email_configured() -> bool:
+    return any(os.environ.get(name) for name in _EMAIL_ENV)
+
+
+def _slack_configured() -> bool:
+    return bool(os.environ.get("SLACK_WEBHOOK_URL", "").strip())
 
 
 def _check_env() -> None:
@@ -57,6 +65,19 @@ def _check_env() -> None:
         raise RuntimeError(
             f"Missing required environment variable(s): {', '.join(missing)}. "
             f"See .env.example for the full list."
+        )
+    # Partial email config is a typo, not a choice: fail rather than silently
+    # dropping to Slack-only.
+    if _email_configured():
+        missing = [name for name in _EMAIL_ENV if not os.environ.get(name)]
+        if missing:
+            raise RuntimeError(
+                f"Email delivery is partially configured; missing: {', '.join(missing)}."
+            )
+    elif not _slack_configured():
+        raise RuntimeError(
+            "No delivery configured. Set RESEND_API_KEY, DIGEST_TO_EMAIL and "
+            "DIGEST_FROM_EMAIL for email, and/or SLACK_WEBHOOK_URL for Slack."
         )
     if not os.environ.get("BRAVE_API_KEY"):
         print("Warning: BRAVE_API_KEY is unset; web search stage will be a no-op.")
@@ -479,8 +500,12 @@ def run() -> None:
     html_body = render_html(items, today_str)
     text_body = render_text(items, today_str)
     subject = subject_line(items, today_str, alert=emergency)
-    send_email(html_body, text_body, subject)
-    send_slack(render_slack(items, today_str))
+    email = _email_configured()
+    if email:
+        send_email(html_body, text_body, subject)
+    # Slack-only: its failure must fail the run, or the items below get
+    # recorded as sent without ever being delivered.
+    send_slack(render_slack(items, today_str), fatal=not email)
 
     # --- Promote sent URLs (longer TTL) and persist ---
     sent_count = 0

@@ -146,11 +146,11 @@ Copy `.env.example` → `.env` and fill in the values below. This file is for ru
 | `LLM_BASE_URL`      | Only for a provider not in the table — any OpenAI-compatible base URL | No |
 | `LLM_API_KEY_ENV`   | Only for a provider not in the table — name of the env var holding its key | No |
 | `LLM_EXTRA`         | JSON merged into the request body. Defaults per provider — `{}` for `github`, `{"reasoning_effort": "low"}` for `xai` | No |
-| `RESEND_API_KEY`    | Resend dashboard | Yes |
-| `DIGEST_TO_EMAIL`   | Comma-separated recipient list | Yes |
-| `DIGEST_FROM_EMAIL` | Verified domain in Resend | Yes |
+| `RESEND_API_KEY`    | Resend dashboard | For email delivery — set all three email variables, or none and use Slack only |
+| `DIGEST_TO_EMAIL`   | Comma-separated recipient list | For email delivery |
+| `DIGEST_FROM_EMAIL` | Verified domain in Resend | For email delivery |
 | `BRAVE_API_KEY`     | Brave Search API (free tier: 2K queries/month) | **Strongly recommended** — without it the web-search pass is a no-op |
-| `SLACK_WEBHOOK_URL` | Slack app's [Incoming Webhooks](https://api.slack.com/messaging/webhooks) page | No — when set, the plain-text digest is also posted to that channel; unset = Slack step is a no-op |
+| `SLACK_WEBHOOK_URL` | Slack app's [Incoming Webhooks](https://api.slack.com/messaging/webhooks) page | No — when set, the plain-text digest is posted to that channel. Can be the only delivery if the email variables are unset; at least one of email or Slack is required |
 
 Set `LLM_PROVIDER` to something other than `github` and that provider's own key becomes the required one instead of `GH_MODELS_TOKEN` — `XAI_API_KEY` for `xai`, `MISTRAL_API_KEY` for `mistral`, and so on (the mapping is `config.PROVIDERS`). Only one LLM key is ever needed.
 
