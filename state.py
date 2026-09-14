@@ -52,11 +52,15 @@ def normalize_url(url: str) -> str:
     path = parts.path
     if path != "/" and path.endswith("/"):
         path = path.rstrip("/")
+    if not path and netloc:
+        path = "/"  # https://ex.com and https://ex.com/ are one URL
 
-    kept = [
-        (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=False)
+    # Sorted so parameter order doesn't split one URL into two keys; blank
+    # values kept so ?amp and ?print stay distinct from the bare URL.
+    kept = sorted(
+        (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
         if k.lower() not in _TRACKING_PARAMS
-    ]
+    )
     query = urlencode(kept)
 
     return urlunsplit((scheme, netloc, path, query, ""))
@@ -98,10 +102,14 @@ def load_state() -> dict:
             continue
         status = entry.get("status")
         date = entry.get("date", "")
-        if status == "sent" and date >= sent_cutoff:
-            pruned[url] = entry
-        elif status == "candidate" and date >= cand_cutoff:
-            pruned[url] = entry
+        if not (status == "sent" and date >= sent_cutoff
+                or status == "candidate" and date >= cand_cutoff):
+            continue
+        # Re-key under the current normalize_url, so a rule change doesn't
+        # orphan entries written under the old one. On a collision, sent wins.
+        key = normalize_url(url)
+        if pruned.get(key, {}).get("status") != "sent":
+            pruned[key] = entry
     return pruned
 
 

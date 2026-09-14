@@ -16,6 +16,8 @@ import llm
     ('```\n["a", "b"]\n```', ["a", "b"]),
     ('```["a","b"]```', ["a", "b"]),  # single-line fence must parse, not crash
     ('["", "a", null, "b"]', ["a", "b"]),  # empty values stripped
+    ('["   ", " a "]', ["a"]),  # whitespace-only dropped after strip
+    ('"foo"', []),  # a bare string is not a list of queries
     ("not json at all", []),
     ("{}", []),
     ("", []),
@@ -98,6 +100,9 @@ def _threat_item(**overrides):
     ({"headline": ["x"]}, False),
     ({"severity": "   "}, False),
     ({"stack_match": 42}, False),
+    ({"why": "Exploiting CVE-XXXX in the wild."}, False),  # placeholder year
+    ({"category": "Threat", "stack_match": ""}, False),  # case can't skip grounding
+    ({"stack_match": "Hub"}, False),  # substring of GitHub, not a stack entry
 ])
 def test_parse_triage_output_guardrails(monkeypatch, overrides, kept):
     monkeypatch.setattr(llm, "STACK_SUMMARY", "CI/CD & SCM: GitHub")
@@ -183,6 +188,7 @@ def test_generate_slow_queries_parses_combined_response(monkeypatch):
 @pytest.mark.parametrize("payload, expected", [
     ("not json", ([], [])),
     ('{"compliance": ["x"]}', (["x"], [])),  # missing key
+    ('{"compliance": "foo", "pqc": ["   "]}', ([], [])),  # not split into chars
 ])
 def test_generate_slow_queries_tolerates_bad_output(monkeypatch, payload, expected):
     monkeypatch.setenv("GH_MODELS_TOKEN", "x")

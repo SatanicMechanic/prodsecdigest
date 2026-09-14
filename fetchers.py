@@ -123,6 +123,17 @@ def entry_published(entry) -> datetime.datetime | None:
     return None
 
 
+def _title_key(title: str) -> str:
+    """Dedup key shared by in-feed and cross-feed matching.
+
+    Casefolded word characters only, so "Critical: Foo Bar" and "Critical Foo
+    Bar!" collapse. Unicode-aware: the old [^a-z0-9] filter reduced every CJK
+    or emoji title to "", so all of them shared one key and only the first
+    survived. A title with no word characters at all keys on itself.
+    """
+    return re.sub(r"[\W_]+", "", title.casefold())[:80] or title
+
+
 def _parse_one_feed(url: str, cutoff: datetime.datetime) -> list[dict]:
     raw = _fetch_feed_bytes(url)
     if raw is None:
@@ -136,7 +147,8 @@ def _parse_one_feed(url: str, cutoff: datetime.datetime) -> list[dict]:
         if published and published < cutoff:
             continue
 
-        title = (getattr(entry, "title", "") or "").strip()
+        # Cleaned the same way search titles are, so both pools dedup alike.
+        title = _strip_html(getattr(entry, "title", "") or "").strip()
         if not title:
             continue
 
@@ -145,8 +157,11 @@ def _parse_one_feed(url: str, cutoff: datetime.datetime) -> list[dict]:
         link = (getattr(entry, "link", "") or "").strip()
         if not link:
             continue
+        # A relative <link>/x</link> is a broken link in the digest and never
+        # matches its absolute twin in dedup.
+        link = urljoin(url, link)
 
-        title_key = title.lower()
+        title_key = _title_key(title)
         if title_key in seen_titles_in_feed:
             continue
         seen_titles_in_feed.add(title_key)
@@ -180,35 +195,42 @@ def fetch_rss_articles(lookback_hours: int, state: dict,
         per_feed_raw.append(_parse_one_feed(url, cutoff))
 
     total_fetched = sum(len(items) for items in per_feed_raw)
-    per_feed = [items[:PER_FEED_CAP] for items in per_feed_raw]
+
+    # Filter before capping. Capping first let already-sent or blocklisted
+    # items use up a feed's PER_FEED_CAP slots, so a feed whose newest entries
+    # were all excluded contributed nothing even when a fresh story sat just
+    # behind them.
+    excl_state = 0
+    excl_blocklist = 0
+    examined = 0
+    per_feed: list[list[dict]] = []
+    for items in per_feed_raw:
+        bucket: list[dict] = []
+        for article in items:
+            if len(bucket) >= PER_FEED_CAP:
+                break
+            examined += 1
+            if is_excluded(article["link"], state, sent_only):
+                excl_state += 1
+            elif _is_blocked(article):
+                excl_blocklist += 1
+            else:
+                bucket.append(article)
+        per_feed.append(bucket)
 
     merged: list[dict] = []
     title_to_kept: dict[str, dict] = {}
-    excl_state = 0
-    excl_blocklist = 0
-    total_popped = 0
 
     while any(per_feed) and len(merged) < MAX_RSS_ARTICLES:
-        progressed = False
         for bucket in per_feed:
             if not bucket or len(merged) >= MAX_RSS_ARTICLES:
                 continue
             article = bucket.pop(0)
-            total_popped += 1
-            progressed = True
 
-            if is_excluded(article["link"], state, sent_only):
-                excl_state += 1
-                continue
-            if _is_blocked(article):
-                excl_blocklist += 1
-                continue
-
-            # Normalized title key for cross-feed dedup. Strip non-alphanumerics
-            # so "Critical: Foo Bar" and "Critical Foo Bar!" collapse. When two
-            # feeds carry the same story we keep the first and annotate it with
-            # the second source — convergence is itself a fire-tier signal.
-            title_key = re.sub(r"[^a-z0-9]", "", article["title"].lower())[:80]
+            # When two feeds carry the same story we keep the first and
+            # annotate it with the second source — convergence is itself a
+            # fire-tier signal.
+            title_key = _title_key(article["title"])
             if title_key in title_to_kept:
                 kept = title_to_kept[title_key]
                 src = article.get("source", "")
@@ -218,13 +240,11 @@ def fetch_rss_articles(lookback_hours: int, state: dict,
             title_to_kept[title_key] = article
 
             merged.append(article)
-        if not progressed:
-            break
 
     stats = {
         "fetched": total_fetched,
-        "after_state_dedup": total_popped - excl_state,
-        "after_blocklist": total_popped - excl_state - excl_blocklist,
+        "after_state_dedup": examined - excl_state,
+        "after_blocklist": examined - excl_state - excl_blocklist,
         "after_cross_feed_dedup": len(merged),
     }
     return merged, stats
@@ -235,7 +255,9 @@ def fetch_rss_articles(lookback_hours: int, state: dict,
 # ---------------------------------------------------------------------------
 
 _STALE_AGE_TOKENS = {"week", "month", "year"}
-_RELATIVE_DAYS_RE = re.compile(r"(\d+)\s*days?\s*ago", re.IGNORECASE)
+# "3 days ago", "30 hours ago", "an hour ago". Days-only let "30 hours ago"
+# fall through to the week/month/year tokens and survive a 24h lookback.
+_RELATIVE_AGE_RE = re.compile(r"\b(\d+|an?)\s*(minute|hour|day)s?\s*ago\b", re.IGNORECASE)
 
 
 def _is_stale_brave_age(age: str, cutoff: datetime.datetime | None = None) -> bool:
@@ -262,14 +284,17 @@ def _is_stale_brave_age(age: str, cutoff: datetime.datetime | None = None) -> bo
         except (ValueError, TypeError):
             pass
 
-        m = _RELATIVE_DAYS_RE.search(age)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        m = _RELATIVE_AGE_RE.search(age)
         if m:
+            n = 1 if m.group(1).lower() in ("a", "an") else int(m.group(1))
             try:
-                days = int(m.group(1))
-                approx = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+                approx = now - datetime.timedelta(**{m.group(2).lower() + "s": n})
                 return approx < cutoff
-            except (ValueError, OverflowError):
+            except OverflowError:
                 pass
+        if "yesterday" in age.lower():
+            return now - datetime.timedelta(days=1) < cutoff
 
     age_lower = age.lower()
     return any(token in age_lower for token in _STALE_AGE_TOKENS)

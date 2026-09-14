@@ -171,6 +171,13 @@ def test_brave_age_token_fallback(age, stale):
     ("1 day ago", 48, False),
     # Token fallback still wins when a cutoff is supplied but parse fails
     ("2 weeks ago", 24, True),
+    # Hours/minutes/articles used to fall through and survive any lookback
+    ("30 hours ago", 24, True),
+    ("3 hours ago", 24, False),
+    ("an hour ago", 24, False),
+    ("90 minutes ago", 1, True),
+    ("yesterday", 12, True),
+    ("yesterday", 48, False),
 ])
 def test_brave_age_with_cutoff(age, cutoff_hours, stale):
     assert fetchers._is_stale_brave_age(age, _ago(hours=cutoff_hours)) is stale
@@ -286,6 +293,29 @@ def test_cross_feed_convergence_no_annotation_for_unique_titles(monkeypatch):
         assert "also_sources" not in a or a["also_sources"] == []
 
 
+def test_per_feed_cap_counts_only_surviving_items(monkeypatch):
+    """Excluded items must not use up a feed's cap and hide a fresh story."""
+    def fake_parse(url, cutoff):
+        return [{"title": f"Story {n}", "link": f"https://ex.com/{n}",
+                 "source": "Feed", "published": "p", "summary": ""}
+                for n in range(7)]
+
+    _rss_setup(monkeypatch, ["feed"], fake_parse)  # PER_FEED_CAP = 5
+    sent = {fetchers.normalize_url(f"https://ex.com/{n}"):
+            {"status": "sent", "date": "2099-01-01"} for n in range(5)}
+    articles, _ = fetchers.fetch_rss_articles(24, sent)
+    assert [a["link"] for a in articles] == ["https://ex.com/5", "https://ex.com/6"]
+
+
+@pytest.mark.parametrize("a, b, same", [
+    ("Critical: OpenSSL flaw!", "critical openssl flaw", True),
+    ("漏洞公告：某产品", "另一条完全不同的新闻", False),  # CJK no longer keys to ""
+    ("🔥🔥", "🚨🚨", False),  # no word chars: keys on the title itself
+])
+def test_title_key(a, b, same):
+    assert (fetchers._title_key(a) == fetchers._title_key(b)) is same
+
+
 def test_cross_feed_convergence_three_way(monkeypatch):
     """Three feeds covering one story → kept article lists the other two as also_sources."""
     def fake_parse(url, cutoff):
@@ -350,3 +380,13 @@ def test_parse_one_feed_drops_entries_without_a_link(monkeypatch):
     monkeypatch.setattr(fetchers, "_fetch_feed_bytes", lambda url: xml)
     out = fetchers._parse_one_feed("f", _ago(hours=24))
     assert [a["title"] for a in out] == ["Has a link"]
+
+
+def test_parse_one_feed_resolves_links_and_dedups_title_variants(monkeypatch):
+    xml = b"""<?xml version="1.0"?><rss version="2.0"><channel><title>F</title>
+      <item><title>Critical: Foo flaw</title><link>/posts/foo</link></item>
+      <item><title>Critical Foo flaw!</title><link>/posts/foo-2</link></item>
+    </channel></rss>"""
+    monkeypatch.setattr(fetchers, "_fetch_feed_bytes", lambda url: xml)
+    out = fetchers._parse_one_feed("https://blog.example.com/feed.xml", _ago(hours=24))
+    assert [a["link"] for a in out] == ["https://blog.example.com/posts/foo"]

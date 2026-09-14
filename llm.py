@@ -137,22 +137,31 @@ def _strip_fences(raw: str) -> str:
     return clean.strip()
 
 
+def _str_list(value) -> list[str]:
+    """Non-blank stripped strings from a JSON list; anything else is [].
+
+    A bare string must not pass: iterating "foo" searched "f", "o", "o".
+    """
+    if not isinstance(value, list):
+        return []
+    return [s for s in (q.strip() for q in value if isinstance(q, str)) if s]
+
+
 def parse_query_json(raw: str) -> list[str]:
     """Parse a JSON array of query strings from LLM output."""
     try:
-        result = json.loads(_strip_fences(raw))
-        if isinstance(result, list):
-            return [str(q).strip() for q in result if q]
+        return _str_list(json.loads(_strip_fences(raw)))
     except json.JSONDecodeError:
-        pass
-    return []
+        return []
 
 
 # A real CVE ID is CVE-YYYY-NNNN+ (4+ digits). Anything shaped like a CVE
 # reference that doesn't match is a placeholder the model typed instead of a
 # real ID (e.g. "CVE-2026-XXXX") — a strong hallucination signal, since a
 # model quoting from real source text has an actual number to copy.
-_CVE_TOKEN_RE = re.compile(r"CVE-\d{4}-[A-Za-z0-9]+", re.IGNORECASE)
+# The year may be a placeholder too ("CVE-XXXX", "CVE-XXXX-XXXX"), and a
+# year with no ID is not a CVE reference either.
+_CVE_TOKEN_RE = re.compile(r"CVE-[0-9X]{4}(?:-[A-Za-z0-9]+)?", re.IGNORECASE)
 _VALID_CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,}$", re.IGNORECASE)
 
 
@@ -177,7 +186,9 @@ def _stack_grounded(item: dict, stack_summary: str) -> bool:
     if not isinstance(quote, str):
         return False
     quote = quote.strip()
-    return bool(quote) and quote.lower() in stack_summary.lower()
+    # Whole-word match: a bare substring let "Hub" ground against "GitHub".
+    return bool(quote) and re.search(
+        rf"(?<!\w){re.escape(quote)}(?!\w)", stack_summary, re.IGNORECASE) is not None
 
 
 def parse_triage_output(raw: str, stats: dict | None = None) -> list[dict] | None:
@@ -225,6 +236,12 @@ def parse_triage_output(raw: str, stats: dict | None = None) -> list[dict] | Non
                   f"{item.get('headline','(no headline)')!r}")
             dropped += 1
             continue
+        # Normalized before the guards below: they compare exactly, so a
+        # "Threat" category skipped stack grounding and "critical " missed the
+        # emergency gate and severity chips.
+        item.update({k: item[k].strip() for k in required})
+        item["category"] = item["category"].lower()
+        item["severity"] = item["severity"].lower()
         if _has_fabricated_cve(item):
             print(f"Warning: dropping LLM item with a malformed CVE reference "
                   f"(hallucination signal): {item.get('headline','(no headline)')!r}")
@@ -235,9 +252,6 @@ def parse_triage_output(raw: str, stats: dict | None = None) -> list[dict] | Non
                   f"(no verbatim stack_match quote): {item.get('headline','(no headline)')!r}")
             dropped += 1
             continue
-        # Stripped once here so "critical " matches the emergency gate and
-        # severity chips, which compare exactly.
-        item.update({k: item[k].strip() for k in required})
         clean_items.append(item)
     if stats is not None:
         stats["returned"] = len(items)
@@ -531,8 +545,8 @@ def generate_slow_queries(lookback_hours: int) -> tuple[list[str], list[str]]:
         return [], []
     if not isinstance(data, dict):
         return [], []
-    comp = [str(q).strip() for q in (data.get("compliance") or []) if q]
-    pqc = [str(q).strip() for q in (data.get("pqc") or []) if q]
+    comp = _str_list(data.get("compliance"))
+    pqc = _str_list(data.get("pqc"))
     return comp[:COMPLIANCE_QUERIES], pqc[:PQC_QUERIES]
 
 

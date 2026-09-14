@@ -20,6 +20,9 @@ import state
     ("https://example.com:443/path", "https://example.com/path"),
     ("http://example.com:80/path", "http://example.com/path"),
     ("HTTPS://example.com/Path?fbclid=abc", "https://example.com/Path"),
+    ("https://example.com", "https://example.com/"),  # bare host == root
+    ("https://example.com/p?b=2&a=1", "https://example.com/p?a=1&b=2"),  # order
+    ("https://example.com/p?amp", "https://example.com/p?amp="),  # flag kept
     ("", ""),
 ])
 def test_normalize_url(inp, expected):
@@ -40,6 +43,20 @@ def test_load_warns_and_returns_empty_on_bad_file(tmp_path, monkeypatch, capsys,
     monkeypatch.setattr(state, "_state_path", lambda: str(path))
     assert state.load_state() == {}
     assert "Warning: state file" in capsys.readouterr().out
+
+
+def test_load_rekeys_entries_under_current_normalization(tmp_path, monkeypatch):
+    """Keys written under an older normalize_url must still suppress."""
+    path = tmp_path / "state.json"
+    today = datetime.date.today().isoformat()
+    path.write_text(json.dumps({
+        "https://example.com": {"status": "sent", "date": today},
+        "https://example.com/p?b=2&a=1": {"status": "candidate", "date": today},
+    }))
+    monkeypatch.setattr(state, "_state_path", lambda: str(path))
+    loaded = state.load_state()
+    assert state.is_excluded("https://example.com/", loaded)
+    assert state.is_excluded("https://example.com/p?a=1&b=2", loaded)
 
 
 def test_record_and_load_roundtrip(tmp_path, monkeypatch):
