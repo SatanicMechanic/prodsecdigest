@@ -61,8 +61,13 @@ def _source_domain(url: str) -> str:
     """
     if _safe_url(url) == "#":
         return ""
+    # hostname, not netloc: netloc keeps userinfo, so
+    # https://trusted.com@evil.com/ was labelled "trusted.com@evil.com".
     try:
-        host = urlsplit(url).netloc.lower()
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        if parts.port:
+            host += f":{parts.port}"
     except ValueError:
         return ""
     return host[4:] if host.startswith("www.") else host
@@ -383,7 +388,10 @@ def render_slack(items: list[dict], date_str: str, alert: bool = False) -> dict:
         headline = _slack_esc(item.get("headline", ""))
         url = _safe_url(item.get("url", ""))
         if url != "#":
-            headline = f"<{url}|{headline}>"
+            # Slack ends a link target at > and splits it at |; escape the
+            # target the way the HTML renderer escapes its href.
+            target = _slack_esc(url).replace("|", "%7C")
+            headline = f"<{target}|{headline}>"
 
         blocks = [
             {"type": "context", "elements": [{

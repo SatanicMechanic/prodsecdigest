@@ -155,9 +155,16 @@ def _full_item(**kw):
     ("http://example.com:8080/y", "example.com:8080"),
     ("javascript:alert(1)", ""),
     ("", ""),
+    ("https://trusted.com@evil.com/x", "evil.com"),  # userinfo can't spoof the label
 ])
 def test_source_domain(url, expected):
     assert render._source_domain(url) == expected
+
+
+def test_slack_link_target_cannot_be_split():
+    payload = render_slack([_full_item(url="https://ex.com/a|b>c")], "Apr 15, 2026")
+    text = payload["attachments"][0]["blocks"][1]["text"]["text"]
+    assert text.startswith("*<https://ex.com/a%7Cb&gt;c|")
 
 
 def test_html_omits_stack_line_when_absent():

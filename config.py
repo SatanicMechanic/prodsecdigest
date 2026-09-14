@@ -126,14 +126,11 @@ PROVIDERS = {
 }
 
 LLM_PROVIDER = _env("LLM_PROVIDER", "github").lower()
-if LLM_PROVIDER not in PROVIDERS and not _env("LLM_BASE_URL"):
-    raise SystemExit(
-        f"Unknown LLM_PROVIDER {LLM_PROVIDER!r}; pick one of "
-        f"{', '.join(sorted(PROVIDERS))} or set LLM_BASE_URL + LLM_API_KEY_ENV."
-    )
+# An unknown provider leaves LLM_BASE_URL empty; digest._check_env reports it.
 _base, _key_env, _extra = PROVIDERS.get(LLM_PROVIDER, ("", "", "{}"))
 
-LLM_BASE_URL = _env("LLM_BASE_URL", _base)
+# Trailing slash stripped: ".../v1/" would otherwise request //chat/completions.
+LLM_BASE_URL = _env("LLM_BASE_URL", _base).rstrip("/")
 # Deliberately not defaulted per provider. Model ids churn faster than
 # anything else here (grok-4.5 → grok-5 → ...), and baking one in makes every
 # model release a code change. Base URLs and key env vars above are stable
@@ -141,7 +138,8 @@ LLM_BASE_URL = _env("LLM_BASE_URL", _base)
 LLM_MODEL = _env("LLM_MODEL")
 LLM_API_KEY_ENV = _env("LLM_API_KEY_ENV", _key_env)
 LLM_EXTRA = _env("LLM_EXTRA", _extra)
-# Validated in digest._check_env rather than here: check_feeds.py imports this
+# Provider, base URL and LLM_EXTRA are all validated in digest._check_env
+# rather than here: check_feeds.py imports this
 # module and never touches the LLM, so raising at import time would break the
 # feed health check over a setting it doesn't use.
 

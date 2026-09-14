@@ -11,6 +11,7 @@ Pipeline:
   6. Persist state (sent URLs -> 30-day suppression, candidate URLs -> cooldown)
 """
 
+import json
 import os
 import datetime
 import concurrent.futures
@@ -26,6 +27,7 @@ from config import (
     COMPLIANCE_QUERIES, PQC_QUERIES,
     TRIAGE_GLOBAL_CAP, TRIAGE_TOOLING_CAP,
     LLM_TIMEOUT_SEC, LLM_API_KEY_ENV, LLM_MODEL, LLM_PROVIDER,
+    LLM_BASE_URL, LLM_EXTRA, PROVIDERS,
     MAX_SEARCH_RESULTS, BROAD_SEARCH_RESULTS,
 )
 from fetchers import fetch_rss_articles, fetch_search_articles
@@ -60,6 +62,19 @@ def _check_env() -> None:
             "model id you want to run — it has no built-in default so that "
             "switching models is a config change, not a code change."
         )
+    if not LLM_BASE_URL or not LLM_API_KEY_ENV:
+        raise RuntimeError(
+            f"Unknown LLM_PROVIDER {LLM_PROVIDER!r}; pick one of "
+            f"{', '.join(sorted(PROVIDERS))} or set LLM_BASE_URL + LLM_API_KEY_ENV."
+        )
+    # Parsed here, not at the first LLM call: query generation swallows
+    # exceptions, so a typo'd LLM_EXTRA used to surface only as a failed triage.
+    try:
+        extra = json.loads(LLM_EXTRA or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"LLM_EXTRA is not valid JSON: {exc}") from None
+    if not isinstance(extra, dict):
+        raise RuntimeError("LLM_EXTRA must be a JSON object.")
     missing = [name for name in _REQUIRED_ENV if not os.environ.get(name)]
     if missing:
         raise RuntimeError(

@@ -59,12 +59,15 @@ INDEPENDENT_QUERIES = MAX_SEARCH_QUERIES - ANCHORED_QUERIES
 # non-idempotent request can double a side effect — a chat completion has none
 # beyond token spend, so retrying is safe here.
 _SESSION = requests.Session()
-_SESSION.mount("https://", HTTPAdapter(max_retries=Retry(
+_ADAPTER = HTTPAdapter(max_retries=Retry(
     total=2,
     backoff_factor=2,
     allowed_methods={"POST"},
     status_forcelist=(429, 500, 502, 503, 504),
-)))
+))
+# http:// too: ollama's default endpoint is plain http on localhost.
+for _scheme in ("https://", "http://"):
+    _SESSION.mount(_scheme, _ADAPTER)
 
 
 def _chat_completion(base_url: str, api_key: str, model: str,

@@ -19,6 +19,12 @@ LOOKBACK_HOURS = 72
 def check_feeds() -> bool:
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=LOOKBACK_HOURS)
     any_failed = False
+    stale = 0
+
+    # An empty list used to fall through to "All feeds reachable" and exit 0.
+    if not FEEDS:
+        print("⚠️  No feeds configured (feeds.md missing or has no links).")
+        return False
 
     print(f"Feed health check — lookback {LOOKBACK_HOURS}h\n")
     print(f"{'STATUS':<14} {'RECENT':>6}  {'TOTAL':>5}  TITLE")
@@ -52,6 +58,7 @@ def check_feeds() -> bool:
             any_failed = True
         elif recent == 0:
             status_str = "STALE"
+            stale += 1
         else:
             status_str = "OK"
 
@@ -62,6 +69,12 @@ def check_feeds() -> bool:
     print()
     if any_failed:
         print("⚠️  One or more feeds are unreachable. Check URLs above.")
+        return False
+    # One quiet blog is normal; every feed quiet at once points at our date
+    # parsing or fetching, not at the feeds.
+    if stale == len(FEEDS):
+        print(f"⚠️  Every feed is STALE (nothing in {LOOKBACK_HOURS}h) — "
+              f"likely a date-parsing or fetch problem.")
         return False
     print("✅  All feeds reachable.")
     return True
