@@ -186,7 +186,6 @@ def fetch_rss_articles(lookback_hours: int, state: dict,
     title_to_kept: dict[str, dict] = {}
     excl_state = 0
     excl_blocklist = 0
-    excl_title = 0
     total_popped = 0
 
     while any(per_feed) and len(merged) < MAX_RSS_ARTICLES:
@@ -215,7 +214,6 @@ def fetch_rss_articles(lookback_hours: int, state: dict,
                 src = article.get("source", "")
                 if src and src != kept.get("source") and src not in kept.get("also_sources", []):
                     kept.setdefault("also_sources", []).append(src)
-                excl_title += 1
                 continue
             title_to_kept[title_key] = article
 

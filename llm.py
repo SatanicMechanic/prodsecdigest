@@ -173,7 +173,10 @@ def _stack_grounded(item: dict, stack_summary: str) -> bool:
     """
     if item.get("category") != "threat":
         return True
-    quote = (item.get("stack_match") or "").strip()
+    quote = item.get("stack_match")
+    if not isinstance(quote, str):
+        return False
+    quote = quote.strip()
     return bool(quote) and quote.lower() in stack_summary.lower()
 
 
@@ -212,8 +215,12 @@ def parse_triage_output(raw: str, stats: dict | None = None) -> list[dict] | Non
         if not isinstance(item, dict):
             dropped += 1
             continue
-        if not all(item.get(k) for k in required):
-            missing = [k for k in required if not item.get(k)]
+        # Strings only: a truthy non-string (url: 12345) would pass a bare
+        # truthiness check and crash the CVE guard, URL grounding, and every
+        # renderer downstream — none of which catch TypeError.
+        missing = [k for k in required
+                   if not (isinstance(item.get(k), str) and item[k].strip())]
+        if missing:
             print(f"Warning: dropping LLM item missing fields {missing}: "
                   f"{item.get('headline','(no headline)')!r}")
             dropped += 1
@@ -228,6 +235,9 @@ def parse_triage_output(raw: str, stats: dict | None = None) -> list[dict] | Non
                   f"(no verbatim stack_match quote): {item.get('headline','(no headline)')!r}")
             dropped += 1
             continue
+        # Stripped once here so "critical " matches the emergency gate and
+        # severity chips, which compare exactly.
+        item.update({k: item[k].strip() for k in required})
         clean_items.append(item)
     if stats is not None:
         stats["returned"] = len(items)

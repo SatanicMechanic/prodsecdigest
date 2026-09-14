@@ -33,6 +33,15 @@ def test_load_returns_empty_when_no_file(tmp_path, monkeypatch):
     assert state.load_state() == {}
 
 
+@pytest.mark.parametrize("content", ["{not json", "[]", "42"])
+def test_load_warns_and_returns_empty_on_bad_file(tmp_path, monkeypatch, capsys, content):
+    path = tmp_path / "state.json"
+    path.write_text(content)
+    monkeypatch.setattr(state, "_state_path", lambda: str(path))
+    assert state.load_state() == {}
+    assert "Warning: state file" in capsys.readouterr().out
+
+
 def test_record_and_load_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(state, "_state_path", lambda: str(tmp_path / "state.json"))
     s: dict = {}

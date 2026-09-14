@@ -78,7 +78,14 @@ def load_state() -> dict:
     try:
         with open(_state_path()) as f:
             raw = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as exc:
+        print(f"Warning: state file is corrupt ({exc}); starting with empty state.")
+        return {}
+    if not isinstance(raw, dict):
+        print(f"Warning: state file holds {type(raw).__name__}, not an object; "
+              f"starting with empty state.")
         return {}
 
     today = datetime.date.today()

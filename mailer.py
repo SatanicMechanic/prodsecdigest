@@ -44,5 +44,10 @@ def send_email(html_body: str, text_body: str, subject: str) -> None:
         )
         resp.raise_for_status()
     except requests.RequestException as exc:
-        raise RuntimeError("Resend delivery failed after retries") from exc
+        # exc.response is None on connection errors. Response body only —
+        # never the request, which carries the Authorization header.
+        detail = ""
+        if exc.response is not None:
+            detail = f": HTTP {exc.response.status_code} {exc.response.text[:300]}"
+        raise RuntimeError(f"Resend delivery failed after retries{detail}") from exc
     print("Email sent.")

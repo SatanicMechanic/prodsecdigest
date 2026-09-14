@@ -10,37 +10,18 @@ import llm
 
 # --- parse_query_json ---
 
-def test_parse_query_json_plain_array():
-    raw = '["query 1", "query 2", "query 3"]'
-    assert llm.parse_query_json(raw) == ["query 1", "query 2", "query 3"]
-
-
-def test_parse_query_json_with_markdown_fence():
-    raw = '```json\n["a", "b"]\n```'
-    assert llm.parse_query_json(raw) == ["a", "b"]
-
-
-def test_parse_query_json_with_plain_fence():
-    raw = '```\n["a", "b"]\n```'
-    assert llm.parse_query_json(raw) == ["a", "b"]
-
-
-def test_strip_fences_handles_single_line_form():
-    """Older bug: `"```{...}```"` with no newline raised IndexError."""
-    assert llm._strip_fences('```["a","b"]```') == '["a","b"]'
-
-
-def test_strip_fences_passes_through_unfenced():
-    assert llm._strip_fences('{"key": "value"}') == '{"key": "value"}'
-
-
-def test_strip_fences_handles_lang_tag_with_newline():
-    assert llm._strip_fences('```json\n{"k": 1}\n```') == '{"k": 1}'
-
-
-def test_parse_query_json_single_line_fenced():
-    """End-to-end: single-line-fenced output must parse, not crash."""
-    assert llm.parse_query_json('```["a","b"]```') == ["a", "b"]
+@pytest.mark.parametrize("raw, expected", [
+    ('["query 1", "query 2", "query 3"]', ["query 1", "query 2", "query 3"]),
+    ('```json\n["a", "b"]\n```', ["a", "b"]),
+    ('```\n["a", "b"]\n```', ["a", "b"]),
+    ('```["a","b"]```', ["a", "b"]),  # single-line fence must parse, not crash
+    ('["", "a", null, "b"]', ["a", "b"]),  # empty values stripped
+    ("not json at all", []),
+    ("{}", []),
+    ("", []),
+])
+def test_parse_query_json(raw, expected):
+    assert llm.parse_query_json(raw) == expected
 
 
 def test_parse_triage_output_tolerates_fenced_json(monkeypatch):
@@ -50,20 +31,6 @@ def test_parse_triage_output_tolerates_fenced_json(monkeypatch):
     items = llm.parse_triage_output(payload)
     assert len(items) == 1
     assert items[0]["headline"] == "x"
-
-
-def test_parse_query_json_strips_empty_values():
-    raw = '["", "a", null, "b"]'
-    out = llm.parse_query_json(raw)
-    assert "a" in out
-    assert "b" in out
-    assert "" not in out
-
-
-def test_parse_query_json_returns_empty_on_garbage():
-    assert llm.parse_query_json("not json at all") == []
-    assert llm.parse_query_json("{}") == []
-    assert llm.parse_query_json("") == []
 
 
 # --- parse_triage_output ---
@@ -100,14 +67,10 @@ def test_parse_triage_output_drops_incomplete_items(monkeypatch):
     assert items[0]["headline"] == "complete"
 
 
-def test_parse_triage_output_invalid_json_raises():
+@pytest.mark.parametrize("raw", ["{invalid json", "[1, 2, 3]"])
+def test_parse_triage_output_malformed_raises(raw):
     with pytest.raises(RuntimeError):
-        llm.parse_triage_output("{invalid json")
-
-
-def test_parse_triage_output_non_dict_raises():
-    with pytest.raises(RuntimeError):
-        llm.parse_triage_output("[1, 2, 3]")
+        llm.parse_triage_output(raw)
 
 
 # --- hallucination guardrails: fabricated CVEs, ungrounded stack claims ---
@@ -122,39 +85,24 @@ def _threat_item(**overrides):
     return item
 
 
-def test_parse_triage_output_drops_placeholder_cve(monkeypatch):
+@pytest.mark.parametrize("overrides, kept", [
+    ({"why": "Exploiting CVE-2026-XXXX in the wild."}, False),  # placeholder CVE
+    ({"why": "Exploiting CVE-2026-41234 in the wild."}, True),
+    ({"stack_match": ""}, False),
+    # stack_match must be a real quote from stack.txt; a plausible out-of-stack
+    # product is exactly the fabrication this check exists to catch.
+    ({"stack_match": "GitLab", "why": "Affects our CI/CD pipeline."}, False),
+    ({"category": "compliance", "stack_match": ""}, True),  # exempt from grounding
+    # Truthy non-strings used to pass and crash downstream with TypeError.
+    ({"url": 12345}, False),
+    ({"headline": ["x"]}, False),
+    ({"severity": "   "}, False),
+    ({"stack_match": 42}, False),
+])
+def test_parse_triage_output_guardrails(monkeypatch, overrides, kept):
     monkeypatch.setattr(llm, "STACK_SUMMARY", "CI/CD & SCM: GitHub")
-    payload = {"items": [_threat_item(why="Exploiting CVE-2026-XXXX in the wild.")]}
-    assert llm.parse_triage_output(json.dumps(payload)) == []
-
-
-def test_parse_triage_output_accepts_real_looking_cve(monkeypatch):
-    monkeypatch.setattr(llm, "STACK_SUMMARY", "CI/CD & SCM: GitHub")
-    payload = {"items": [_threat_item(why="Exploiting CVE-2026-41234 in the wild.")]}
-    items = llm.parse_triage_output(json.dumps(payload))
-    assert len(items) == 1
-
-
-def test_parse_triage_output_drops_threat_item_without_stack_match(monkeypatch):
-    monkeypatch.setattr(llm, "STACK_SUMMARY", "CI/CD & SCM: GitHub")
-    payload = {"items": [_threat_item(stack_match="")]}
-    assert llm.parse_triage_output(json.dumps(payload)) == []
-
-
-def test_parse_triage_output_drops_threat_item_with_ungrounded_stack_match(monkeypatch):
-    """stack_match must be a real quote — a plausible-sounding one that isn't
-    actually in stack.txt (e.g. an out-of-stack product like GitLab) is exactly
-    the fabrication this check exists to catch."""
-    monkeypatch.setattr(llm, "STACK_SUMMARY", "CI/CD & SCM: GitHub")
-    payload = {"items": [_threat_item(stack_match="GitLab", why="Affects our CI/CD pipeline.")]}
-    assert llm.parse_triage_output(json.dumps(payload)) == []
-
-
-def test_parse_triage_output_compliance_items_exempt_from_stack_match(monkeypatch):
-    monkeypatch.setattr(llm, "STACK_SUMMARY", "CI/CD & SCM: GitHub")
-    payload = {"items": [_threat_item(category="compliance", stack_match="")]}
-    items = llm.parse_triage_output(json.dumps(payload))
-    assert len(items) == 1
+    payload = {"items": [_threat_item(**overrides)]}
+    assert len(llm.parse_triage_output(json.dumps(payload))) == int(kept)
 
 
 # --- build_triage_input ---
@@ -232,20 +180,14 @@ def test_generate_slow_queries_parses_combined_response(monkeypatch):
     assert pqc == ["NIST FIPS 203 rollout"]
 
 
-def test_generate_slow_queries_handles_garbage(monkeypatch):
+@pytest.mark.parametrize("payload, expected", [
+    ("not json", ([], [])),
+    ('{"compliance": ["x"]}', (["x"], [])),  # missing key
+])
+def test_generate_slow_queries_tolerates_bad_output(monkeypatch, payload, expected):
     monkeypatch.setenv("GH_MODELS_TOKEN", "x")
-    with mock.patch.object(llm, "call_llm", return_value="not json"):
-        comp, pqc = llm.generate_slow_queries(24)
-    assert comp == []
-    assert pqc == []
-
-
-def test_generate_slow_queries_handles_missing_keys(monkeypatch):
-    monkeypatch.setenv("GH_MODELS_TOKEN", "x")
-    with mock.patch.object(llm, "call_llm", return_value='{"compliance": ["x"]}'):
-        comp, pqc = llm.generate_slow_queries(24)
-    assert comp == ["x"]
-    assert pqc == []
+    with mock.patch.object(llm, "call_llm", return_value=payload):
+        assert llm.generate_slow_queries(24) == expected
 
 
 def test_generate_slow_queries_caps_to_configured_counts(monkeypatch):
@@ -365,23 +307,18 @@ def test_call_llm_extracts_text_from_chunked_content(monkeypatch):
     assert result == "result"
 
 
-def test_call_llm_merges_llm_extra_into_payload(monkeypatch):
+@pytest.mark.parametrize("extra, expected", [
+    ('{"reasoning_effort": "low"}', "low"),
+    ("{}", "<absent>"),
+])
+def test_call_llm_merges_llm_extra(monkeypatch, extra, expected):
     """LLM_EXTRA is provider-specific knobs (e.g. xAI's reasoning_effort)."""
     monkeypatch.setenv(llm.LLM_API_KEY_ENV, "tok")
-    monkeypatch.setattr(llm, "LLM_EXTRA", '{"reasoning_effort": "low"}')
+    monkeypatch.setattr(llm, "LLM_EXTRA", extra)
     mock_post = _make_mock_post()
     with mock.patch.object(llm._SESSION, "post", mock_post):
         llm.call_llm("sys", "user")
-    assert _post_payload(mock_post).get("reasoning_effort") == "low"
-
-
-def test_call_llm_omits_extra_when_llm_extra_empty(monkeypatch):
-    monkeypatch.setenv(llm.LLM_API_KEY_ENV, "tok")
-    monkeypatch.setattr(llm, "LLM_EXTRA", "{}")
-    mock_post = _make_mock_post()
-    with mock.patch.object(llm._SESSION, "post", mock_post):
-        llm.call_llm("sys", "user")
-    assert "reasoning_effort" not in _post_payload(mock_post)
+    assert _post_payload(mock_post).get("reasoning_effort", "<absent>") == expected
 
 
 def test_call_llm_sets_json_mode(monkeypatch):

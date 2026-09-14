@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 import render
 from render import render_html, render_slack, render_text, subject_line, _safe_url
 
@@ -33,18 +35,18 @@ def test_html_escapes_url_in_href():
     assert 'href="https://example.com/x?a=1&amp;b=2"' in out
 
 
-def test_safe_url_accepts_http_and_https():
-    assert _safe_url("https://example.com/x") == "https://example.com/x"
-    assert _safe_url("http://example.com/x") == "http://example.com/x"
-
-
-def test_safe_url_rejects_dangerous_schemes():
-    assert _safe_url("javascript:alert(1)") == "#"
-    assert _safe_url("data:text/html,<script>") == "#"
-    assert _safe_url("file:///etc/passwd") == "#"
-    assert _safe_url("ftp://example.com/x") == "#"
-    assert _safe_url("") == "#"
-    assert _safe_url(None) == "#"
+@pytest.mark.parametrize("url, expected", [
+    ("https://example.com/x", "https://example.com/x"),
+    ("http://example.com/x", "http://example.com/x"),
+    ("javascript:alert(1)", "#"),
+    ("data:text/html,<script>", "#"),
+    ("file:///etc/passwd", "#"),
+    ("ftp://example.com/x", "#"),
+    ("", "#"),
+    (None, "#"),
+])
+def test_safe_url(url, expected):
+    assert _safe_url(url) == expected
 
 
 def test_javascript_url_does_not_leak_into_html():
@@ -89,25 +91,16 @@ def _make_item(sev):
             "why": "y", "action": "z", "url": "https://example.com"}
 
 
-def test_subject_line_critical_prefix():
-    assert "🔴" in subject_line([_make_item("critical")], "Apr 15, 2026")
-
-
-def test_subject_line_high_prefix():
-    out = subject_line([_make_item("high")], "Apr 15, 2026")
-    assert "🟠" in out
-    assert "🔴" not in out
-
-
-def test_subject_line_medium_prefix():
-    out = subject_line([_make_item("medium")], "Apr 15, 2026")
-    assert "🟠" not in out
-    assert "🔴" not in out
-
-
-def test_subject_line_critical_wins_over_high():
-    items = [_make_item("high"), _make_item("critical"), _make_item("medium")]
-    assert "🔴" in subject_line(items, "Apr 15, 2026")
+@pytest.mark.parametrize("severities, red, orange", [
+    (["critical"], True, False),
+    (["high"], False, True),
+    (["medium"], False, False),
+    (["high", "critical", "medium"], True, False),  # critical wins
+])
+def test_subject_line_severity_prefix(severities, red, orange):
+    out = subject_line([_make_item(s) for s in severities], "Apr 15, 2026")
+    assert ("🔴" in out) is red
+    assert ("🟠" in out) is orange
 
 
 def test_slack_escapes_link_markup():
@@ -157,25 +150,14 @@ def _full_item(**kw):
     return item
 
 
-def test_source_domain_strips_www_and_scheme():
-    assert render._source_domain("https://www.github.blog/x") == "github.blog"
-    assert render._source_domain("http://example.com:8080/y") == "example.com:8080"
-
-
-def test_source_domain_empty_for_unsafe_url():
-    assert render._source_domain("javascript:alert(1)") == ""
-    assert render._source_domain("") == ""
-
-
-def test_html_shows_source_and_stack():
-    out = render_html([_full_item()], "Apr 15, 2026")
-    assert "Source: github.blog" in out
-    assert "Stack: GitHub Actions" in out
-
-
-def test_html_puts_action_before_why():
-    out = render_html([_full_item()], "Apr 15, 2026")
-    assert out.index("action text") < out.index("why text")
+@pytest.mark.parametrize("url, expected", [
+    ("https://www.github.blog/x", "github.blog"),
+    ("http://example.com:8080/y", "example.com:8080"),
+    ("javascript:alert(1)", ""),
+    ("", ""),
+])
+def test_source_domain(url, expected):
+    assert render._source_domain(url) == expected
 
 
 def test_html_omits_stack_line_when_absent():
@@ -186,19 +168,16 @@ def test_html_omits_stack_line_when_absent():
     assert "Source: github.blog" in out
 
 
-def test_text_puts_action_before_why_and_carries_source():
-    out = render_text([_full_item()], "Apr 15, 2026")
-    assert out.index("Do now: action text") < out.index("Why: why text")
+@pytest.mark.parametrize("render_fn, action, why", [
+    (render_html, "action text", "why text"),
+    (render_text, "Do now: action text", "Why: why text"),
+    (lambda items, d: json.dumps(render_slack(items, d)), "Do now", "Why it matters"),
+])
+def test_renderers_put_action_before_why_and_carry_source(render_fn, action, why):
+    out = render_fn([_full_item()], "Apr 15, 2026")
+    assert out.index(action) < out.index(why)
     assert "Source: github.blog" in out
     assert "Stack: GitHub Actions" in out
-
-
-def test_slack_puts_action_before_why_and_carries_source():
-    payload = render_slack([_full_item()], "Apr 15, 2026")
-    blob = json.dumps(payload)
-    assert blob.index("Do now") < blob.index("Why it matters")
-    assert "Source: github.blog" in blob
-    assert "Stack: GitHub Actions" in blob
 
 
 def test_slack_fallback_leads_with_headline():
@@ -240,24 +219,24 @@ def test_alert_subject_strips_newlines_from_headline():
     assert "\n" not in out and "\r" not in out
 
 
+def test_slack_alert_header_matches_email_subject():
+    payload = render_slack([_full_item()], "Apr 15, 2026", alert=True)
+    assert "ALERT" in payload["blocks"][0]["text"]["text"]
+
+
 def test_alert_subject_falls_back_when_no_items():
     assert "Need to Know" in subject_line([], "Apr 15, 2026", alert=True)
 
 
 # --- Header-bound LLM text is capped as well as flattened ---
 
-def test_clip_leaves_short_text_alone():
-    assert render._clip("short headline", 120) == "short headline"
-
-
-def test_clip_collapses_all_whitespace():
-    assert render._clip("a\r\nb\tc   d", 120) == "a b c d"
-
-
-def test_clip_marks_truncation():
-    out = render._clip("x" * 300, 120)
-    assert len(out) == 120
-    assert out.endswith("…")
+@pytest.mark.parametrize("text, expected", [
+    ("short headline", "short headline"),
+    ("a\r\nb\tc   d", "a b c d"),
+    ("x" * 300, "x" * 119 + "…"),
+])
+def test_clip(text, expected):
+    assert render._clip(text, 120) == expected
 
 
 def test_alert_subject_caps_headline_length():

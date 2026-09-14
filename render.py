@@ -365,7 +365,7 @@ def slack_fallback(items: list[dict], date_str: str) -> str:
     return f"{_severity_prefix(items)} {_slack_esc(lead)}{more}"
 
 
-def render_slack(items: list[dict], date_str: str) -> dict:
+def render_slack(items: list[dict], date_str: str, alert: bool = False) -> dict:
     """Block Kit payload mirroring the email cards.
 
     Each item is its own attachment so Slack draws the severity color as a
@@ -423,7 +423,7 @@ def render_slack(items: list[dict], date_str: str) -> dict:
         "text": slack_fallback(items, date_str),
         "blocks": [{"type": "header", "text": {
             "type": "plain_text",
-            "text": subject_line(items, date_str)[:150],
+            "text": subject_line(items, date_str, alert=alert)[:150],
             "emoji": True,
         }}],
         "attachments": attachments,

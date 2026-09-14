@@ -17,26 +17,14 @@ def _item(url, category="threat", headline=None):
 
 # --- both-skip path ---
 
-def test_both_none_returns_empty():
-    assert _merge_triage_results(None, None) == []
-
-
-def test_both_empty_returns_empty():
-    assert _merge_triage_results([], []) == []
-
-
-def test_a_none_b_has_items():
-    b = [_item("https://b.com", "tooling")]
-    result = _merge_triage_results(None, b)
-    assert len(result) == 1
-    assert result[0]["url"] == "https://b.com"
-
-
-def test_b_none_a_has_items():
-    a = [_item("https://a.com", "threat")]
-    result = _merge_triage_results(a, None)
-    assert len(result) == 1
-    assert result[0]["url"] == "https://a.com"
+@pytest.mark.parametrize("a, b, urls", [
+    (None, None, []),
+    ([], [], []),
+    (None, [_item("https://b.com", "tooling")], ["https://b.com"]),
+    ([_item("https://a.com", "threat")], None, ["https://a.com"]),
+])
+def test_merge_skip_and_empty_inputs(a, b, urls):
+    assert [r["url"] for r in _merge_triage_results(a, b)] == urls
 
 
 # --- URL dedupe: A wins on tie ---
@@ -51,11 +39,15 @@ def test_url_dedupe_a_wins():
     assert result[0]["headline"] == "threat headline"
 
 
-def test_url_dedupe_case_insensitive():
-    a = [_item("https://Example.COM/path", "threat")]
-    b = [_item("https://example.com/path", "tooling")]
-    result = _merge_triage_results(a, b)
-    assert len(result) == 1
+@pytest.mark.parametrize("a, b", [
+    ([_item("https://Example.COM/path")], [_item("https://example.com/path", "tooling")]),
+    # One URL-equality rule: tracking params and trailing slashes collapse here
+    # instead of surviving as two items.
+    ([_item("https://ex.com/x?utm_source=nl"), _item("https://ex.com/x")], []),
+    ([_item("https://ex.com/x/")], [_item("https://ex.com/x")]),
+])
+def test_url_dedupe_variants(a, b):
+    assert len(_merge_triage_results(a, b)) == 1
 
 
 # --- tooling cap = 1 ---
@@ -97,31 +89,18 @@ def test_ordering_threat_before_tooling():
 
 # --- items with missing or blank url are skipped in dedup ---
 
-def test_items_with_no_url_are_excluded():
-    a = [{"headline": "x", "category": "threat", "severity": "high",
-          "why": "w", "action": "a", "url": ""}]
-    result = _merge_triage_results(a, None)
-    assert result == []
-
-
-def test_items_with_none_url_are_excluded():
-    a = [{"headline": "x", "category": "threat", "severity": "high",
-          "why": "w", "action": "a", "url": None}]
-    result = _merge_triage_results(a, None)
-    assert result == []
+@pytest.mark.parametrize("url", ["", None])
+def test_items_without_url_are_excluded(url):
+    assert _merge_triage_results([_item(url)], None) == []
 
 
 # --- _fail_on_total_triage_failure: both calls erroring must be loud ---
 
-def test_fail_on_total_triage_failure_raises_with_both_errors():
+def test_fail_on_total_triage_failure_raises_with_errors():
     with pytest.raises(RuntimeError, match="Both triage calls failed"):
         _fail_on_total_triage_failure(ValueError("bad key"), TimeoutError("slow"))
-
-
-def test_fail_on_total_triage_failure_message_includes_both_exceptions():
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(RuntimeError, match="bad key"):
         _fail_on_total_triage_failure(ValueError("bad key"), None)
-    assert "bad key" in str(exc_info.value)
 
 
 # --- URL grounding (triage output must point at the pool we showed the model) ---
@@ -129,44 +108,23 @@ def test_fail_on_total_triage_failure_message_includes_both_exceptions():
 from digest import _ground_urls  # noqa: E402
 
 
-def test_ground_urls_drops_url_not_in_pool():
-    """An invented URL would be emailed to the reader and fetched by the
-    enrichment pass, so it must not survive triage."""
-    pool = {"https://ex.com/real"}
-    items = [_item("https://ex.com/real"), _item("https://evil.example/invented")]
-    kept = _ground_urls(items, pool)
-    assert [i["url"] for i in kept] == ["https://ex.com/real"]
-
-
-def test_ground_urls_canonicalizes_survivors():
-    """A pool URL echoed back with tracking params or a trailing slash is a
-    real candidate — keep it, but rewrite it to the form state suppression
-    and the merge dedupe both use."""
-    pool = {"https://ex.com/story"}
-    kept = _ground_urls([_item("https://ex.com/story/?utm_source=newsletter")], pool)
-    assert [i["url"] for i in kept] == ["https://ex.com/story"]
+@pytest.mark.parametrize("urls, pool, expected", [
+    # An invented URL would be emailed to the reader and fetched by the
+    # enrichment pass, so it must not survive triage.
+    (["https://ex.com/real", "https://evil.example/invented"], {"https://ex.com/real"},
+     ["https://ex.com/real"]),
+    # A pool URL echoed back with tracking params or a trailing slash is real;
+    # keep it, rewritten to the form state suppression and merge dedupe use.
+    (["https://ex.com/story/?utm_source=newsletter"], {"https://ex.com/story"},
+     ["https://ex.com/story"]),
+    (["https://ex.com/a"], set(), []),
+])
+def test_ground_urls(urls, pool, expected):
+    assert [i["url"] for i in _ground_urls([_item(u) for u in urls], pool)] == expected
 
 
 def test_ground_urls_passes_skip_through():
     assert _ground_urls(None, {"https://ex.com/a"}) is None
-
-
-def test_ground_urls_empty_pool_drops_everything():
-    assert _ground_urls([_item("https://ex.com/a")], set()) == []
-
-
-def test_merge_dedupes_tracking_param_variants():
-    """Same story, one copy with tracking params: one URL-equality rule means
-    it collapses here instead of surviving as two items."""
-    out = _merge_triage_results(
-        [_item("https://ex.com/x?utm_source=nl"), _item("https://ex.com/x")], []
-    )
-    assert len(out) == 1
-
-
-def test_merge_dedupes_trailing_slash_variants():
-    out = _merge_triage_results([_item("https://ex.com/x/")], [_item("https://ex.com/x")])
-    assert len(out) == 1
 
 
 # --- Emergency re-check bar ---
@@ -174,54 +132,39 @@ def test_merge_dedupes_trailing_slash_variants():
 from digest import _emergency_filter, _no_digest_reason  # noqa: E402
 
 
-def test_emergency_filter_keeps_one_critical_threat():
-    items = [_item("https://ex.com/a", headline="crit")]
-    items[0]["severity"] = "critical"
-    assert [i["url"] for i in _emergency_filter(items)] == ["https://ex.com/a"]
+@pytest.mark.parametrize("category, severity, count, kept", [
+    ("threat", "critical", 1, 1),
+    # High is digest-worthy but not worth re-interrupting a reader who
+    # already got today's digest.
+    ("threat", "high", 1, 0),
+    ("tooling", "critical", 1, 0),
+    ("threat", "critical", 3, 1),  # capped at one
+])
+def test_emergency_filter(category, severity, count, kept):
+    items = [dict(_item(f"https://ex.com/{n}", category), severity=severity)
+             for n in range(count)]
+    assert len(_emergency_filter(items)) == kept
 
 
-def test_emergency_filter_drops_non_critical():
-    """A high-severity item is digest-worthy but not worth re-interrupting a
-    reader who already got today's digest."""
-    items = [_item("https://ex.com/a")]  # severity "high"
-    assert _emergency_filter(items) == []
-
-
-def test_emergency_filter_drops_non_threat_categories():
-    item = _item("https://ex.com/a", category="tooling")
-    item["severity"] = "critical"
-    assert _emergency_filter([item]) == []
-
-
-def test_emergency_filter_caps_at_one():
-    items = []
-    for n in range(3):
-        it = _item(f"https://ex.com/{n}")
-        it["severity"] = "critical"
-        items.append(it)
-    assert len(_emergency_filter(items)) == 1
+def test_emergency_gate_runs_before_global_cap(monkeypatch):
+    """A critical threat ranked past the cap must still reach the gate."""
+    import digest
+    monkeypatch.setattr(digest, "TRIAGE_GLOBAL_CAP", 3)
+    threats = [_item(f"https://ex.com/{n}") for n in range(4)]
+    threats[3]["severity"] = "critical"
+    out = _merge_triage_results(threats, [], emergency=True)
+    assert [i["url"] for i in out] == ["https://ex.com/3"]
 
 
 # --- Degraded vs healthy skip ---
 
-def test_no_digest_reason_degraded_is_not_a_skip():
-    msg = _no_digest_reason(["threat triage returned unparseable JSON"], False)
-    assert "DEGRADED" in msg
-    assert "unparseable JSON" in msg
-
-
-def test_no_digest_reason_degraded_wins_over_emergency():
-    msg = _no_digest_reason(["threat triage call failed"], True)
-    assert "DEGRADED" in msg
-
-
-def test_no_digest_reason_healthy_skip():
-    msg = _no_digest_reason([], False)
-    assert "SKIP" in msg
-    assert "DEGRADED" not in msg
-
-
-def test_no_digest_reason_emergency_clear():
-    msg = _no_digest_reason([], True)
-    assert "Emergency re-check clear" in msg
-    assert "DEGRADED" not in msg
+@pytest.mark.parametrize("degraded, emergency, present, absent", [
+    (["threat triage returned unparseable JSON"], False, ["DEGRADED", "unparseable JSON"], []),
+    (["threat triage call failed"], True, ["DEGRADED"], []),  # degraded wins
+    ([], False, ["SKIP"], ["DEGRADED"]),
+    ([], True, ["Emergency re-check clear"], ["DEGRADED"]),
+])
+def test_no_digest_reason(degraded, emergency, present, absent):
+    msg = _no_digest_reason(degraded, emergency)
+    assert all(s in msg for s in present)
+    assert not any(s in msg for s in absent)

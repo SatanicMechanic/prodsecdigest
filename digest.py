@@ -121,7 +121,7 @@ def _ground_urls(items, pool_urls: set[str]):
     return grounded
 
 
-def _merge_triage_results(items_a, items_b) -> list:
+def _merge_triage_results(items_a, items_b, emergency: bool = False) -> list:
     """Merge threat-triage and tooling-triage outputs with dedup and slot caps.
 
     Dedup uses normalize_url — the same rule state suppression uses — so a
@@ -144,6 +144,11 @@ def _merge_triage_results(items_a, items_b) -> list:
         if u and u not in seen:
             seen.add(u)
             deduped_b.append(it)
+
+    # The emergency bar applies before any cap: a critical threat ranked past
+    # the global cap would otherwise be sliced off and the run logged "clear".
+    if emergency:
+        return _emergency_filter(deduped_a)
 
     # Threats fill first; tooling contributes at most TRIAGE_TOOLING_CAP items.
     a_picks = deduped_a[:TRIAGE_GLOBAL_CAP]
@@ -472,9 +477,7 @@ def run() -> None:
     items_threat = _parse_and_ground(raw_threat, "Threat")
     items_tooling = [] if emergency else _parse_and_ground(raw_tooling, "Tooling")
 
-    items = _merge_triage_results(items_threat, items_tooling)
-    if emergency:
-        items = _emergency_filter(items)
+    items = _merge_triage_results(items_threat, items_tooling, emergency)
     if not items:
         print(_no_digest_reason(degraded, emergency))
         save_state(state)
@@ -505,7 +508,7 @@ def run() -> None:
         send_email(html_body, text_body, subject)
     # Slack-only: its failure must fail the run, or the items below get
     # recorded as sent without ever being delivered.
-    send_slack(render_slack(items, today_str), fatal=not email)
+    send_slack(render_slack(items, today_str, alert=emergency), fatal=not email)
 
     # --- Promote sent URLs (longer TTL) and persist ---
     sent_count = 0

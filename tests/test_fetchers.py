@@ -6,17 +6,24 @@ News-cycle triage happens entirely in the LLM.
 
 import datetime
 import re
+from types import SimpleNamespace
+
+import pytest
+
 import fetchers
 
 
 # --- HTML stripping (applied to RSS summary + Brave description/title) ---
 
-def test_strip_html_removes_simple_tags():
-    assert fetchers._strip_html("<p>hello <b>world</b></p>") == "hello world"
-
-
-def test_strip_html_unescapes_entities():
-    assert fetchers._strip_html("AT&amp;T &quot;urgent&quot;") == 'AT&T "urgent"'
+@pytest.mark.parametrize("raw, expected", [
+    ("<p>hello <b>world</b></p>", "hello world"),
+    ("AT&amp;T &quot;urgent&quot;", 'AT&T "urgent"'),
+    ("a\n\n  b\t\tc", "a b c"),
+    ("", ""),
+    (None, ""),
+])
+def test_strip_html(raw, expected):
+    assert fetchers._strip_html(raw) == expected
 
 
 def test_strip_html_does_not_reanimate_encoded_tags():
@@ -30,15 +37,6 @@ def test_strip_html_does_not_reanimate_encoded_tags():
     assert "</script>" not in out
 
 
-def test_strip_html_collapses_whitespace():
-    assert fetchers._strip_html("a\n\n  b\t\tc") == "a b c"
-
-
-def test_strip_html_handles_empty_and_none():
-    assert fetchers._strip_html("") == ""
-    assert fetchers._strip_html(None) == ""
-
-
 def test_strip_html_strips_attributes():
     out = fetchers._strip_html('<a href="evil:x" onclick="alert(1)">link text</a>')
     assert "evil:x" not in out
@@ -46,191 +44,135 @@ def test_strip_html_strips_attributes():
     assert "link text" in out
 
 
-# --- Blocklist ---
+# --- Blocklist matching rules (patched lists) ---
 
 def _patterns(*terms):
     return [re.compile(r"\b" + re.escape(t) + r"\b", re.IGNORECASE) for t in terms]
 
 
-def test_blocked_by_title_substring(monkeypatch):
-    monkeypatch.setattr(fetchers, "_BLOCKLIST_TITLE_PATTERNS", _patterns("weekly recap"))
-    article = {"title": "Security Weekly Recap — Apr 15",
-               "link": "https://example.com/x"}
-    assert fetchers._is_blocked(article)
+def _art(link, title=None):
+    return {"title": title or "Some article title", "link": link}
 
 
-def test_blocked_title_is_case_insensitive(monkeypatch):
-    monkeypatch.setattr(fetchers, "_BLOCKLIST_TITLE_PATTERNS", _patterns("weekly recap"))
-    article = {"title": "SECURITY WEEKLY RECAP", "link": "https://example.com/x"}
-    assert fetchers._is_blocked(article)
+@pytest.mark.parametrize("term, title, blocked", [
+    ("weekly recap", "Security Weekly Recap — Apr 15", True),
+    ("weekly recap", "SECURITY WEEKLY RECAP", True),  # case-insensitive
+    ("RSA", "RSA Conference 2026 recap", True),       # standalone term
+    ("RSA", "pseudoRSA encryption scheme", False),    # not at a word boundary
+])
+def test_title_blocklist(monkeypatch, term, title, blocked):
+    monkeypatch.setattr(fetchers, "_BLOCKLIST_TITLE_PATTERNS", _patterns(term))
+    assert fetchers._is_blocked(_art("https://example.com/x", title)) is blocked
 
 
-def test_word_boundary_matches_standalone_term(monkeypatch):
-    monkeypatch.setattr(fetchers, "_BLOCKLIST_TITLE_PATTERNS", _patterns("RSA"))
-    assert fetchers._is_blocked({"title": "RSA Conference 2026 recap", "link": "https://example.com/x"})
+@pytest.mark.parametrize("domain, link, blocked", [
+    ("spam.example.com", "https://spam.example.com/article", True),
+    ("bad.com", "https://sub.bad.com/article", True),     # subdomains too
+    ("spam.example.com", "https://other.com/article", False),
+    ("bad.com", "https://notbad.com/article", False),     # suffix, not subdomain
+])
+def test_domain_blocklist(monkeypatch, domain, link, blocked):
+    monkeypatch.setattr(fetchers, "BLOCKLIST_DOMAINS", [domain])
+    assert fetchers._is_blocked(_art(link, "x")) is blocked
 
 
-def test_word_boundary_does_not_match_embedded_term(monkeypatch):
-    # "pseudoRSA" — RSA is not at a word boundary, so \bRSA\b should not match
-    monkeypatch.setattr(fetchers, "_BLOCKLIST_TITLE_PATTERNS", _patterns("RSA"))
-    assert not fetchers._is_blocked({"title": "pseudoRSA encryption scheme", "link": "https://example.com/x"})
-
-
-def test_blocked_by_domain_exact(monkeypatch):
-    monkeypatch.setattr(fetchers, "BLOCKLIST_DOMAINS", ["spam.example.com"])
-    assert fetchers._is_blocked({
-        "title": "x", "link": "https://spam.example.com/article",
-    })
-
-
-def test_blocked_by_domain_subdomain(monkeypatch):
-    """Blocklist of 'bad.com' should also block 'sub.bad.com'."""
-    monkeypatch.setattr(fetchers, "BLOCKLIST_DOMAINS", ["bad.com"])
-    assert fetchers._is_blocked({
-        "title": "x", "link": "https://sub.bad.com/article",
-    })
-
-
-def test_not_blocked_unrelated_domain(monkeypatch):
-    monkeypatch.setattr(fetchers, "BLOCKLIST_DOMAINS", ["spam.example.com"])
-    assert not fetchers._is_blocked({
-        "title": "x", "link": "https://other.com/article",
-    })
-
-
-def test_not_blocked_similar_but_different(monkeypatch):
-    """'bad.com' should NOT block 'notbad.com'."""
-    monkeypatch.setattr(fetchers, "BLOCKLIST_DOMAINS", ["bad.com"])
-    assert not fetchers._is_blocked({
-        "title": "x", "link": "https://notbad.com/article",
-    })
+@pytest.mark.parametrize("pattern, link, blocked", [
+    (r"/price[s]?/", "https://exchange.com/en/price/somecoin", True),
+    (r"aws\.amazon\.com/compliance/", "https://AWS.Amazon.com/Compliance/FedRAMP/", True),
+    # A genuine article on a non-markets path must survive.
+    (r"reuters\.com/markets/", "https://reuters.com/technology/cybersecurity/breach-x", False),
+])
+def test_url_pattern_blocklist(monkeypatch, pattern, link, blocked):
+    monkeypatch.setattr(fetchers, "_BLOCKLIST_URL_PATTERNS", [re.compile(pattern, re.IGNORECASE)])
+    assert fetchers._is_blocked(_art(link, "x")) is blocked
 
 
 def test_empty_blocklists(monkeypatch):
     monkeypatch.setattr(fetchers, "_BLOCKLIST_TITLE_PATTERNS", [])
     monkeypatch.setattr(fetchers, "BLOCKLIST_DOMAINS", [])
     monkeypatch.setattr(fetchers, "_BLOCKLIST_URL_PATTERNS", [])
-    assert not fetchers._is_blocked({
-        "title": "Anything", "link": "https://any.com/x",
-    })
+    assert not fetchers._is_blocked(_art("https://any.com/x", "Anything"))
 
 
-# --- URL-pattern blocklist (evergreen index / price / marketing pages) ---
+# --- Shipped blocklist (real config) ---
+# Real backfill URLs observed in SKIP reports (June 2026).
 
-def test_blocked_by_url_pattern(monkeypatch):
-    monkeypatch.setattr(fetchers, "_BLOCKLIST_URL_PATTERNS",
-                        [re.compile(r"/price[s]?/", re.IGNORECASE)])
-    assert fetchers._is_blocked({
-        "title": "Some Coin Live Price", "link": "https://exchange.com/en/price/somecoin",
-    })
+@pytest.mark.parametrize("link, title", [
+    # Bare homepages
+    ("https://aws.amazon.com/", None),
+    ("https://trust.wiz.io/", None),
+    ("https://aws.amazon.com", None),
+    # Section index pages
+    ("https://aws.amazon.com/blogs/", None),
+    ("https://aws.amazon.com/blogs/security/", None),
+    ("https://aws.amazon.com/new/", None),
+    ("https://aws.amazon.com/resources/analyst-reports/?trk=16c76003", None),
+    ("https://github.com/advisories", None),
+    ("https://docs.cloud.google.com/release-notes", None),
+    ("https://status.cloud.google.com/", None),
+    # Newsroom indexes (the June 22 anthropic.com/news miss)
+    ("https://www.anthropic.com/news", None),
+    ("https://openai.com/blog/", None),
+    ("https://example.com/press?utm=x", None),
+    # Patch Tuesday / monthly-update titles, YouTube
+    ("https://windowsforum.com/threads/whatever", "Windows 11 June 2026 Patch Tuesday (June 9)"),
+    ("https://example.com/x", "Android June Monthly Security Update explained"),
+    ("https://www.youtube.com/watch?v=vK9fen8u2IE", None),
+])
+def test_shipped_blocklist_blocks(link, title):
+    assert fetchers._is_blocked(_art(link, title))
 
 
-def test_url_pattern_is_case_insensitive(monkeypatch):
-    monkeypatch.setattr(fetchers, "_BLOCKLIST_URL_PATTERNS",
-                        [re.compile(r"aws\.amazon\.com/compliance/", re.IGNORECASE)])
-    assert fetchers._is_blocked({
-        "title": "FedRAMP", "link": "https://AWS.Amazon.com/Compliance/FedRAMP/",
-    })
-
-
-def test_url_pattern_does_not_block_real_article(monkeypatch):
-    monkeypatch.setattr(fetchers, "_BLOCKLIST_URL_PATTERNS",
-                        [re.compile(r"reuters\.com/markets/", re.IGNORECASE)])
-    # A genuine article on a non-markets path must survive.
-    assert not fetchers._is_blocked({
-        "title": "Breach report", "link": "https://reuters.com/technology/cybersecurity/breach-x",
-    })
+@pytest.mark.parametrize("link, title", [
+    ("https://aws.amazon.com/blogs/security/building-secure-b2c-applications/", None),
+    ("https://github.com/advisories/GHSA-xxxx-yyyy-zzzz", None),
+    ("https://www.bleepingcomputer.com/news/security/some-zero-day-story/", None),
+    ("https://www.anthropic.com/news/claude-fable-5-mythos-5", None),
+    ("https://example.com/x", "Emergency patch for actively exploited zero-day"),
+])
+def test_shipped_blocklist_keeps_real_articles(link, title):
+    assert not fetchers._is_blocked(_art(link, title))
 
 
 # --- Brave age filter ---
 
-def _cutoff(hours: int) -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
+def _ago(**delta) -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(**delta)
 
 
 # Token-fallback path (no cutoff supplied): preserves legacy behavior.
-
-def test_stale_age_week():
-    assert fetchers._is_stale_brave_age("2 weeks ago")
-
-
-def test_stale_age_month():
-    assert fetchers._is_stale_brave_age("1 month ago")
-
-
-def test_stale_age_year():
-    assert fetchers._is_stale_brave_age("1 year ago")
-
-
-def test_stale_age_case_insensitive():
-    assert fetchers._is_stale_brave_age("2 Weeks Ago")
+@pytest.mark.parametrize("age, stale", [
+    ("2 weeks ago", True),
+    ("1 month ago", True),
+    ("1 year ago", True),
+    ("2 Weeks Ago", True),  # case-insensitive
+    ("3 hours ago", False),
+    ("unknown", False),
+    ("", False),
+    (None, False),
+])
+def test_brave_age_token_fallback(age, stale):
+    assert fetchers._is_stale_brave_age(age) is stale
 
 
-def test_fresh_age_hours():
-    assert not fetchers._is_stale_brave_age("3 hours ago")
-
-
-def test_fresh_age_unknown():
-    assert not fetchers._is_stale_brave_age("unknown")
-
-
-def test_fresh_age_empty():
-    assert not fetchers._is_stale_brave_age("")
-
-
-def test_fresh_age_none():
-    assert not fetchers._is_stale_brave_age(None)
-
-
-# ISO 8601 page_age path (cutoff-aware): a date-format value older than the
-# lookback should be filtered. Previously these slipped through and reached
-# the triage LLM with a visibly old publication date.
-
-def test_iso_age_older_than_cutoff_is_stale():
-    old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=6)).isoformat()
-    assert fetchers._is_stale_brave_age(old, _cutoff(24))
-
-
-def test_iso_age_within_cutoff_is_fresh():
-    recent = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=6)).isoformat()
-    assert not fetchers._is_stale_brave_age(recent, _cutoff(24))
-
-
-def test_iso_age_with_z_suffix():
-    old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    assert fetchers._is_stale_brave_age(old, _cutoff(24))
-
-
-def test_iso_age_naive_treated_as_utc():
-    old_naive = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=10)).replace(tzinfo=None).isoformat()
-    assert fetchers._is_stale_brave_age(old_naive, _cutoff(24))
-
-
-def test_iso_age_72h_lookback_includes_2_day_old():
-    """Monday catchup runs with 72h lookback; a 2-day-old item should be fresh."""
-    two_days_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)).isoformat()
-    assert not fetchers._is_stale_brave_age(two_days_ago, _cutoff(72))
-
-
-# "N days ago" relative path
-
-def test_relative_days_older_than_cutoff_is_stale():
-    assert fetchers._is_stale_brave_age("6 days ago", _cutoff(24))
-
-
-def test_relative_days_within_cutoff_is_fresh():
-    assert not fetchers._is_stale_brave_age("6 days ago", _cutoff(168))  # 7-day cutoff
-
-
-def test_relative_single_day():
-    assert fetchers._is_stale_brave_age("2 days ago", _cutoff(24))
-    assert not fetchers._is_stale_brave_age("1 day ago", _cutoff(48))
-
-
-# Token fallback still wins when cutoff is supplied but parse fails
-
-def test_token_fallback_when_unparseable_with_cutoff():
-    assert fetchers._is_stale_brave_age("2 weeks ago", _cutoff(24))
+# Cutoff-aware paths. ISO 8601 page_age values older than the lookback used to
+# slip through and reach the triage LLM with a visibly old publication date.
+@pytest.mark.parametrize("age, cutoff_hours, stale", [
+    (_ago(days=6).isoformat(), 24, True),
+    (_ago(hours=6).isoformat(), 24, False),
+    (_ago(days=10).strftime("%Y-%m-%dT%H:%M:%SZ"), 24, True),       # Z suffix
+    (_ago(days=10).replace(tzinfo=None).isoformat(), 24, True),     # naive = UTC
+    (_ago(days=2).isoformat(), 72, False),  # Monday 72h catch-up keeps 2-day-old
+    # "N days ago" relative form
+    ("6 days ago", 24, True),
+    ("6 days ago", 168, False),
+    ("2 days ago", 24, True),
+    ("1 day ago", 48, False),
+    # Token fallback still wins when a cutoff is supplied but parse fails
+    ("2 weeks ago", 24, True),
+])
+def test_brave_age_with_cutoff(age, cutoff_hours, stale):
+    assert fetchers._is_stale_brave_age(age, _ago(hours=cutoff_hours)) is stale
 
 
 # --- Search query attribution ---
@@ -277,16 +219,19 @@ def test_search_first_query_owns_duplicate(monkeypatch):
 
 # --- Cross-feed convergence annotation ---
 
-def test_cross_feed_convergence_preserves_duplicate_source(monkeypatch):
-    """When two feeds carry a story with the same normalized title, the kept
-    article carries the duplicate's source as 'also_sources' so the triage LLM
-    sees source convergence."""
-    monkeypatch.setattr(fetchers, "FEEDS", ["feed-a", "feed-b"])
+def _rss_setup(monkeypatch, feeds, fake_parse):
+    monkeypatch.setattr(fetchers, "FEEDS", feeds)
     monkeypatch.setattr(fetchers, "MAX_RSS_ARTICLES", 10)
     monkeypatch.setattr(fetchers, "PER_FEED_CAP", 5)
     monkeypatch.setattr(fetchers, "_BLOCKLIST_TITLE_PATTERNS", [])
     monkeypatch.setattr(fetchers, "BLOCKLIST_DOMAINS", [])
+    monkeypatch.setattr(fetchers, "_parse_one_feed", fake_parse)
 
+
+def test_cross_feed_convergence_preserves_duplicate_source(monkeypatch):
+    """When two feeds carry a story with the same normalized title, the kept
+    article carries the duplicate's source as 'also_sources' so the triage LLM
+    sees source convergence."""
     def fake_parse(url, cutoff):
         if url == "feed-a":
             return [{"title": "Critical: OpenSSL flaw exploited",
@@ -296,7 +241,7 @@ def test_cross_feed_convergence_preserves_duplicate_source(monkeypatch):
                  "link": "https://b.example.com/x", "source": "Feed B",
                  "published": "2026-04-14", "summary": ""}]
 
-    monkeypatch.setattr(fetchers, "_parse_one_feed", fake_parse)
+    _rss_setup(monkeypatch, ["feed-a", "feed-b"], fake_parse)
     articles, _ = fetchers.fetch_rss_articles(24, {})
     assert len(articles) == 1
     kept = articles[0]
@@ -305,12 +250,6 @@ def test_cross_feed_convergence_preserves_duplicate_source(monkeypatch):
 
 
 def test_cross_feed_convergence_no_annotation_for_unique_titles(monkeypatch):
-    monkeypatch.setattr(fetchers, "FEEDS", ["feed-a", "feed-b"])
-    monkeypatch.setattr(fetchers, "MAX_RSS_ARTICLES", 10)
-    monkeypatch.setattr(fetchers, "PER_FEED_CAP", 5)
-    monkeypatch.setattr(fetchers, "_BLOCKLIST_TITLE_PATTERNS", [])
-    monkeypatch.setattr(fetchers, "BLOCKLIST_DOMAINS", [])
-
     def fake_parse(url, cutoff):
         if url == "feed-a":
             return [{"title": "Story A", "link": "https://a.example.com/x",
@@ -318,7 +257,7 @@ def test_cross_feed_convergence_no_annotation_for_unique_titles(monkeypatch):
         return [{"title": "Story B", "link": "https://b.example.com/y",
                  "source": "Feed B", "published": "p", "summary": ""}]
 
-    monkeypatch.setattr(fetchers, "_parse_one_feed", fake_parse)
+    _rss_setup(monkeypatch, ["feed-a", "feed-b"], fake_parse)
     articles, _ = fetchers.fetch_rss_articles(24, {})
     assert len(articles) == 2
     for a in articles:
@@ -327,17 +266,11 @@ def test_cross_feed_convergence_no_annotation_for_unique_titles(monkeypatch):
 
 def test_cross_feed_convergence_three_way(monkeypatch):
     """Three feeds covering one story → kept article lists the other two as also_sources."""
-    monkeypatch.setattr(fetchers, "FEEDS", ["a", "b", "c"])
-    monkeypatch.setattr(fetchers, "MAX_RSS_ARTICLES", 10)
-    monkeypatch.setattr(fetchers, "PER_FEED_CAP", 5)
-    monkeypatch.setattr(fetchers, "_BLOCKLIST_TITLE_PATTERNS", [])
-    monkeypatch.setattr(fetchers, "BLOCKLIST_DOMAINS", [])
-
     def fake_parse(url, cutoff):
         return [{"title": "Same story", "link": f"https://{url}.example.com/x",
                  "source": f"Source {url.upper()}", "published": "p", "summary": ""}]
 
-    monkeypatch.setattr(fetchers, "_parse_one_feed", fake_parse)
+    _rss_setup(monkeypatch, ["a", "b", "c"], fake_parse)
     articles, _ = fetchers.fetch_rss_articles(24, {})
     assert len(articles) == 1
     also = articles[0].get("also_sources", [])
@@ -345,99 +278,33 @@ def test_cross_feed_convergence_three_way(monkeypatch):
     assert "Source C" in also
 
 
-# --- Blocklist additions from skip-report review (June 2026) ---
-# Real backfill URLs observed in SKIP reports; all should be blocked.
-
-def _art(link, title="Some article title"):
-    return {"title": title, "link": link}
-
-
-def test_blocklist_bare_homepages():
-    assert fetchers._is_blocked(_art("https://aws.amazon.com/"))
-    assert fetchers._is_blocked(_art("https://trust.wiz.io/"))
-    assert fetchers._is_blocked(_art("https://aws.amazon.com"))
-
-
-def test_blocklist_section_index_pages():
-    assert fetchers._is_blocked(_art("https://aws.amazon.com/blogs/"))
-    assert fetchers._is_blocked(_art("https://aws.amazon.com/blogs/security/"))
-    assert fetchers._is_blocked(_art("https://aws.amazon.com/new/"))
-    assert fetchers._is_blocked(_art(
-        "https://aws.amazon.com/resources/analyst-reports/?trk=16c76003"))
-    assert fetchers._is_blocked(_art("https://github.com/advisories"))
-    assert fetchers._is_blocked(_art(
-        "https://docs.cloud.google.com/release-notes"))
-    assert fetchers._is_blocked(_art("https://status.cloud.google.com/"))
-    # Newsroom indexes (the June 22 anthropic.com/news miss)
-    assert fetchers._is_blocked(_art("https://www.anthropic.com/news"))
-    assert fetchers._is_blocked(_art("https://openai.com/blog/"))
-    assert fetchers._is_blocked(_art("https://example.com/press?utm=x"))
-
-
-def test_blocklist_real_articles_not_blocked():
-    assert not fetchers._is_blocked(_art(
-        "https://aws.amazon.com/blogs/security/building-secure-b2c-applications/"))
-    assert not fetchers._is_blocked(_art(
-        "https://github.com/advisories/GHSA-xxxx-yyyy-zzzz"))
-    assert not fetchers._is_blocked(_art(
-        "https://www.bleepingcomputer.com/news/security/some-zero-day-story/"))
-    assert not fetchers._is_blocked(_art(
-        "https://www.anthropic.com/news/claude-fable-5-mythos-5"))
-
-
-def test_blocklist_patch_tuesday_title_and_youtube():
-    assert fetchers._is_blocked(_art(
-        "https://windowsforum.com/threads/whatever", title="Windows 11 June 2026 Patch Tuesday (June 9)"))
-    assert fetchers._is_blocked(_art(
-        "https://example.com/x", title="Android June Monthly Security Update explained"))
-    assert fetchers._is_blocked(_art("https://www.youtube.com/watch?v=vK9fen8u2IE"))
-    assert not fetchers._is_blocked(_art(
-        "https://example.com/x", title="Emergency patch for actively exploited zero-day"))
-
-
 # --- Brave auth failure must not abort the run (RSS path stays alive) ---
 
-def test_search_auth_failure_returns_empty_instead_of_raising(monkeypatch):
+def test_search_auth_failure_returns_empty_and_stops(monkeypatch):
     """A bad/expired BRAVE_API_KEY used to propagate out of fetch_search_articles
-    and kill the run before triage, discarding a healthy RSS pool."""
-    monkeypatch.setattr(fetchers, "_BLOCKLIST_URL_PATTERNS", [])
-
-    def fake_brave(query, lookback_hours, count=5):
-        raise RuntimeError("Brave Search auth failure: 401")
-
-    monkeypatch.setattr(fetchers, "search_brave", fake_brave)
-    specs = [{"label": "independent", "query": "q1", "count": 3}]
-    out, stats = fetchers.fetch_search_articles(specs, 24, {}, [])
-    assert out == []
-    assert stats["after_blocklist"] == 0
-
-
-def test_search_auth_failure_stops_remaining_queries(monkeypatch):
-    """Auth is global, so the remaining queries must not each burn a request."""
+    and kill the run before triage, discarding a healthy RSS pool. Auth is
+    global, so the remaining queries must not each burn a request."""
     monkeypatch.setattr(fetchers, "_BLOCKLIST_URL_PATTERNS", [])
     calls = []
 
     def fake_brave(query, lookback_hours, count=5):
         calls.append(query)
-        raise RuntimeError("Brave Search auth failure: 403")
+        raise RuntimeError("Brave Search auth failure: 401")
 
     monkeypatch.setattr(fetchers, "search_brave", fake_brave)
     specs = [{"label": "independent", "query": f"q{i}", "count": 3} for i in range(5)]
-    fetchers.fetch_search_articles(specs, 24, {}, [])
+    out, stats = fetchers.fetch_search_articles(specs, 24, {}, [])
+    assert out == []
+    assert stats["after_blocklist"] == 0
     assert calls == ["q0"]
 
 
 # --- entry_published fallback ---
 
-class _Entry:
-    def __init__(self, **kw):
-        self.__dict__.update(kw)
-
-
 def test_entry_published_falls_back_when_published_is_malformed():
     """A malformed published_parsed used to `break` out of the loop, skipping
     the updated_parsed fallback entirely."""
-    entry = _Entry(published_parsed=("not", "a", "time", "tuple", 0, 0),
+    entry = SimpleNamespace(published_parsed=("not", "a", "time", "tuple", 0, 0),
                    updated_parsed=(2026, 4, 14, 9, 30, 0, 0, 0, 0))
     got = fetchers.entry_published(entry)
     assert got is not None
@@ -445,7 +312,7 @@ def test_entry_published_falls_back_when_published_is_malformed():
 
 
 def test_entry_published_returns_none_when_both_malformed():
-    entry = _Entry(published_parsed=("x",) * 6, updated_parsed=("y",) * 6)
+    entry = SimpleNamespace(published_parsed=("x",) * 6, updated_parsed=("y",) * 6)
     assert fetchers.entry_published(entry) is None
 
 
@@ -459,5 +326,5 @@ def test_parse_one_feed_drops_entries_without_a_link(monkeypatch):
       <item><title>No link at all</title></item>
     </channel></rss>"""
     monkeypatch.setattr(fetchers, "_fetch_feed_bytes", lambda url: xml)
-    out = fetchers._parse_one_feed("f", _cutoff(24))
+    out = fetchers._parse_one_feed("f", _ago(hours=24))
     assert [a["title"] for a in out] == ["Has a link"]
