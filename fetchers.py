@@ -304,12 +304,27 @@ def search_brave(query: str, lookback_hours: int,
         if resp.status_code != 200:
             print(f"Warning: Brave Search returned {resp.status_code} for: {query}")
             return []
+        # Third-party shape: {"web": null}, a non-list, or non-dict items raise
+        # AttributeError, which nothing above catches — one odd response would
+        # abort the run and discard the healthy RSS pool.
+        data = resp.json()
+        web = data.get("web") if isinstance(data, dict) else None
+        items = web.get("results") if isinstance(web, dict) else None
+        if not isinstance(items, list):
+            print(f"Warning: Brave Search returned an unexpected shape for: {query}")
+            return []
+
+        def _str(v) -> str:
+            return v if isinstance(v, str) else ""
+
         results = []
-        for item in resp.json().get("web", {}).get("results", []):
-            url = item.get("url", "")
-            title = _strip_html(item.get("title", "") or "")
-            description = _strip_html(item.get("description", "") or "")[:SUMMARY_MAX_CHARS]
-            age = item.get("page_age") or item.get("age") or "unknown"
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            url = _str(item.get("url"))
+            title = _strip_html(_str(item.get("title")))
+            description = _strip_html(_str(item.get("description")))[:SUMMARY_MAX_CHARS]
+            age = _str(item.get("page_age")) or _str(item.get("age")) or "unknown"
             if _is_stale_brave_age(age, cutoff):
                 continue
             if url and title:

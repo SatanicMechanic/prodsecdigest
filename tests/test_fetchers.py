@@ -7,6 +7,7 @@ News-cycle triage happens entirely in the LLM.
 import datetime
 import re
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 
@@ -173,6 +174,27 @@ def test_brave_age_token_fallback(age, stale):
 ])
 def test_brave_age_with_cutoff(age, cutoff_hours, stale):
     assert fetchers._is_stale_brave_age(age, _ago(hours=cutoff_hours)) is stale
+
+
+_GOOD = {"url": "https://ex.com/a", "title": "t", "page_age": "unknown"}
+
+
+@pytest.mark.parametrize("body, kept", [
+    ({"web": {"results": [_GOOD]}}, 1),
+    ({"web": None}, 0),
+    ({"web": {"results": None}}, 0),
+    ([], 0),
+    ({"web": {"results": ["junk", 42, _GOOD]}}, 1),
+    ({"web": {"results": [dict(_GOOD, page_age=12345)]}}, 1),
+    ({"web": {"results": [dict(_GOOD, title=["t"])]}}, 0),
+])
+def test_search_brave_survives_malformed_response(monkeypatch, body, kept):
+    """A 200 with an odd shape must degrade to fewer results, not abort the run."""
+    monkeypatch.setenv("BRAVE_API_KEY", "k")
+    resp = mock.MagicMock(status_code=200)
+    resp.json.return_value = body
+    monkeypatch.setattr(fetchers.requests, "get", lambda *a, **kw: resp)
+    assert len(fetchers.search_brave("q", 24)) == kept
 
 
 # --- Search query attribution ---
