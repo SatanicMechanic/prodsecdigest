@@ -12,10 +12,11 @@ The default set below is opinionated and skews cloud-native / AWS / GitHub-heavy
 - [Node.js vulnerability feed](https://nodejs.org/en/feed/vulnerability.xml) — Node.js security releases (primary source, low volume)
 - [Python blog](https://blog.python.org/feeds/posts/default) — CPython releases including security releases; fire-tier bar filters routine posts
 - [NCSC (UK) blog](https://www.ncsc.gov.uk/api/1/services/v1/blog-post-rss-feed.xml) — Editorial guidance and policy analysis (AI risk, OT resilience, crypto/PKI); low-volume (~2/week), not a CVE feed
+- [Hacker News front page, 150+ points](https://hnrss.org/frontpage?points=150) — The one aggregator here. Items link to the article itself, so the reader still gets the primary source, and 150 points means engineers are paying attention. ~6 items/day, mostly off-topic; the triage bar rejects those. Posts daily, so the pool isn't empty on quiet weekends. Via hnrss.org, a third-party proxy that rate-limits bursts (one fetch per run is fine).
 
 ## What's intentionally not here
 
-- **Krebs, The Register, SANS ISC, other journalism** — not primary sources. Surfaced via the Brave Search pass with urgency-biased queries instead.
+- **Krebs, The Register, SANS ISC, other journalism** — not primary sources. Surfaced via the Brave Search pass with urgency-biased queries instead. (Hacker News is the exception above: it links out to the primary source rather than rewriting it.)
 - **MSRC, Amazon Linux ALAS, Red Hat errata, etc.** — per-CVE firehoses. Scanner territory; those pipelines already handle it.
 - **CISA advisories** — surfaced via the Brave Search pass (`CISA emergency directive`, `CISA out-of-band advisory`).
 - **Engineering and exploit-research blogs** (Cloudflare, Netflix, Meta, Project Zero, etc.) — not fed directly. General engineering blogs flood the pool with non-security posts; dedicated exploit-research blogs skew toward consumer endpoint/mobile/OS/browser/hardware work that's out of scope for a server-side product-security reader. The genuinely transferable write-ups are surfaced on demand via the tooling-scan Brave query instead.
