@@ -70,13 +70,26 @@ def _state_path() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), STATE_PATH)
 
 
+# The digest day rolls over at 04:00 UTC, not midnight. The evening run
+# (22:43 UTC) routinely fires hours late, past UTC midnight; with a midnight
+# rollover its delivery counted as the next day's, and that morning's digest
+# took itself for the emergency re-check. 04:00 sits in the overnight gap: the
+# evening run would have to be 5h+ late to cross it, and the morning run
+# (06:37 UTC) never fires early.
+_DAY_ROLLOVER = datetime.timedelta(hours=4)
+
+
+def digest_day() -> datetime.date:
+    return (datetime.datetime.now(datetime.timezone.utc) - _DAY_ROLLOVER).date()
+
+
 def _today() -> str:
-    return datetime.date.today().isoformat()
+    return digest_day().isoformat()
 
 
 def _cutoff(days: int) -> str:
     """ISO date `days` ago; entries dated on or after it are in the window."""
-    return (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
+    return (digest_day() - datetime.timedelta(days=days)).isoformat()
 
 
 def load_state() -> dict:
@@ -168,7 +181,7 @@ def record_sent(state: dict, urls: list[str], headline: str = "") -> None:
 
 
 def sent_today(state: dict) -> bool:
-    """True if at least one item was delivered in today's run."""
+    """True if an earlier run this digest day delivered (see _DAY_ROLLOVER)."""
     today = _today()
     return any(
         v.get("status") == "sent" and v.get("date") == today

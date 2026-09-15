@@ -204,6 +204,25 @@ def test_search_brave_survives_malformed_response(monkeypatch, body, kept):
     assert len(fetchers.search_brave("q", 24)) == kept
 
 
+@pytest.mark.parametrize("body, logged, not_logged", [
+    # Brave's real zero-result body: no "web" key at all (live API, 2026-09-15).
+    ({"type": "search", "query": {"original": "q"}, "mixed": {}},
+     "0 results", "unexpected shape"),
+    ({"web": None}, "unexpected shape", "0 results"),
+])
+def test_search_brave_logs_zero_results_apart_from_malformed(monkeypatch, capsys,
+                                                             body, logged, not_logged):
+    """Warning on an empty answer made quiet queries read as API breakage."""
+    monkeypatch.setenv("BRAVE_API_KEY", "k")
+    resp = mock.MagicMock(status_code=200)
+    resp.json.return_value = body
+    monkeypatch.setattr(fetchers.requests, "get", lambda *a, **kw: resp)
+    assert fetchers.search_brave("q", 24) == []
+    out = capsys.readouterr().out
+    assert logged in out
+    assert not_logged not in out
+
+
 # --- Search query attribution ---
 
 def test_search_tags_results_with_query_attribution(monkeypatch):

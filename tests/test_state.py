@@ -234,3 +234,26 @@ def test_is_excluded_sent_only_still_suppresses_delivered():
 def test_is_excluded_unknown_url_is_never_excluded():
     assert state.is_excluded("https://ex.com/new", {}) is False
     assert state.is_excluded("https://ex.com/new", {}, sent_only=True) is False
+
+
+# --- day rollover (which run is the emergency re-check) ---
+
+def test_evening_delivery_after_utc_midnight_does_not_demote_next_morning(freeze_utc):
+    """The 22:43 UTC evening run fires ~2h late, past UTC midnight. Counting its
+    delivery as the next day's made that morning's digest skip itself as the
+    re-check (2026-09-10: sent 00:36 UTC, 14:36 UTC morning run skipped)."""
+    st: dict = {}
+    freeze_utc("2026-09-10T00:36")
+    state.record_sent(st, ["https://ex.com/evening"], headline="h")
+    freeze_utc("2026-09-10T14:36")
+    assert state.sent_today(st) is False
+
+
+def test_morning_delivery_still_makes_late_evening_run_the_recheck(freeze_utc):
+    """The rollover must not overshoot: a morning delivery still turns that
+    evening's late run (past UTC midnight) into the re-check."""
+    st: dict = {}
+    freeze_utc("2026-09-14T13:16")
+    state.record_sent(st, ["https://ex.com/morning"], headline="h")
+    freeze_utc("2026-09-15T00:54")
+    assert state.sent_today(st) is True

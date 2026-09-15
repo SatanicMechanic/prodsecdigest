@@ -338,6 +338,11 @@ def search_brave(query: str, lookback_hours: int,
         # AttributeError, which nothing above catches — one odd response would
         # abort the run and discard the healthy RSS pool.
         data = resp.json()
+        # Brave omits "web" entirely when a query matches nothing. That is an
+        # empty answer, not a malformed one — don't warn on it.
+        if isinstance(data, dict) and "web" not in data:
+            print(f"Brave Search: 0 results for: {query}")
+            return []
         web = data.get("web") if isinstance(data, dict) else None
         items = web.get("results") if isinstance(web, dict) else None
         if not isinstance(items, list):

@@ -32,7 +32,7 @@ from config import (
 )
 from fetchers import fetch_rss_articles, fetch_search_articles
 from state import (load_state, save_state, record_candidates, record_sent,
-                   recent_sent_headlines, sent_today, normalize_url)
+                   recent_sent_headlines, sent_today, normalize_url, digest_day)
 from render import render_html, render_slack, render_text, subject_line
 from mailer import send_email
 from slack import send_slack
@@ -253,8 +253,11 @@ def _fail_on_total_triage_failure(threat_exc: Exception | None,
 
 
 def get_lookback_hours() -> int:
-    """72 hours on Monday (covers the weekend), 24 hours otherwise."""
-    return 72 if datetime.date.today().weekday() == 0 else 24
+    """72 hours on Monday (covers the weekend), 24 hours otherwise.
+
+    Monday means the digest day, so Monday's evening run still covers the
+    weekend when it fires after UTC midnight."""
+    return 72 if digest_day().weekday() == 0 else 24
 
 
 def run() -> None:
@@ -272,8 +275,9 @@ def run() -> None:
     # blind the afternoon run to an actual fire. The bar is deliberately much
     # higher: threats only, critical only, at most one item.
     #
-    # Both scheduled runs (10:37 and 22:43 UTC) fall on the same UTC date, so
-    # date-equality is a sound check; revisit if the schedule changes.
+    # Both scheduled runs fall on the same digest day, which rolls over at
+    # 04:00 UTC rather than midnight because the evening run often fires after
+    # UTC midnight (state._DAY_ROLLOVER). Revisit if a run moves across 04:00.
     emergency = sent_today(state)
     if emergency:
         print("An earlier run today already delivered. Emergency re-check only: "

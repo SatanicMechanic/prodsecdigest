@@ -13,7 +13,9 @@ on:
     # before; restore to '37 10' at that point.
     - cron: '37 06 * * 1-5'
     # 22:43 UTC = 15:43 PDT / 14:43 PST — the emergency re-check; sends only a
-    # new critical threat if the morning run already delivered.
+    # new critical threat if the morning run already delivered. That check
+    # assumes this run fires before 04:00 UTC and the morning run after it
+    # (state._DAY_ROLLOVER) — keep both slots on their side of that line.
     - cron: '43 22 * * 1-5'
   workflow_dispatch:
 

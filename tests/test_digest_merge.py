@@ -185,3 +185,20 @@ _NO_SEARCH = {"fetched": 0, "after_rss_dedup": 0, "after_state_dedup": 0, "after
 def test_empty_pool_report(rss, search, present):
     msg = _empty_pool_report(72, rss, search)
     assert all(s in msg for s in present)
+
+
+# --- Lookback window ---
+
+from digest import get_lookback_hours  # noqa: E402
+
+
+@pytest.mark.parametrize("now, hours", [
+    ("2026-09-14T13:16", 72),  # Monday morning run
+    # Monday's 22:43 UTC evening run firing late, past UTC midnight, is still
+    # Monday's run and still covers the weekend.
+    ("2026-09-15T00:54", 72),
+    ("2026-09-15T12:03", 24),  # Tuesday morning
+])
+def test_lookback_follows_digest_day(freeze_utc, now, hours):
+    freeze_utc(now)
+    assert get_lookback_hours() == hours
