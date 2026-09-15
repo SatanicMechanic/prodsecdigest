@@ -123,6 +123,11 @@ def entry_published(entry) -> datetime.datetime | None:
     return None
 
 
+def _cutoff(lookback_hours: int) -> datetime.datetime:
+    """UTC instant `lookback_hours` ago; anything older is out of the window."""
+    return datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=lookback_hours)
+
+
 def _title_key(title: str) -> str:
     """Dedup key shared by in-feed and cross-feed matching.
 
@@ -188,7 +193,7 @@ def fetch_rss_articles(lookback_hours: int, state: dict,
 
     Returns (articles, stats) where stats carries funnel counts for logging.
     """
-    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=lookback_hours)
+    cutoff = _cutoff(lookback_hours)
 
     per_feed_raw: list[list[dict]] = []
     for url in FEEDS:
@@ -307,7 +312,7 @@ def search_brave(query: str, lookback_hours: int,
         return []
 
     freshness = "pw" if lookback_hours >= 48 else "pd"
-    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=lookback_hours)
+    cutoff = _cutoff(lookback_hours)
 
     # result_filter=web drops video/discussion/FAQ/infobox verticals from the
     # response — those types are pure backfill for security-news queries and
@@ -382,7 +387,6 @@ def fetch_search_articles(query_specs: list[dict], lookback_hours: int,
     seen_in_search: set[str] = set()
     out: list[dict] = []
     total_brave = 0
-    excl_invalid = 0
     excl_rss_dedup = 0
     excl_state = 0
     excl_blocklist = 0
@@ -403,7 +407,6 @@ def fetch_search_articles(query_specs: list[dict], lookback_hours: int,
             total_brave += 1
             norm = normalize_url(r["link"])
             if not norm:
-                excl_invalid += 1
                 continue
             if norm in rss_norm_urls or norm in seen_in_search:
                 excl_rss_dedup += 1
@@ -421,8 +424,8 @@ def fetch_search_articles(query_specs: list[dict], lookback_hours: int,
 
     stats = {
         "fetched": total_brave,
-        "after_rss_dedup": total_brave - excl_invalid - excl_rss_dedup,
-        "after_state_dedup": total_brave - excl_invalid - excl_rss_dedup - excl_state,
+        "after_rss_dedup": total_brave - excl_rss_dedup,
+        "after_state_dedup": total_brave - excl_rss_dedup - excl_state,
         "after_blocklist": len(out),
     }
     print(f"Search returned {len(out)} unique new articles.")

@@ -74,6 +74,11 @@ def _today() -> str:
     return datetime.date.today().isoformat()
 
 
+def _cutoff(days: int) -> str:
+    """ISO date `days` ago; entries dated on or after it are in the window."""
+    return (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
+
+
 def load_state() -> dict:
     """Return state dict, pruning expired entries.
 
@@ -92,9 +97,8 @@ def load_state() -> dict:
               f"starting with empty state.")
         return {}
 
-    today = datetime.date.today()
-    sent_cutoff = (today - datetime.timedelta(days=STATE_SENT_TTL_DAYS)).isoformat()
-    cand_cutoff = (today - datetime.timedelta(days=STATE_CANDIDATE_COOLDOWN_DAYS)).isoformat()
+    sent_cutoff = _cutoff(STATE_SENT_TTL_DAYS)
+    cand_cutoff = _cutoff(STATE_CANDIDATE_COOLDOWN_DAYS)
 
     pruned: dict = {}
     for url, entry in raw.items():
@@ -174,7 +178,7 @@ def sent_today(state: dict) -> bool:
 
 def recent_sent_headlines(state: dict, days: int = 7) -> list[str]:
     """Return headlines from sent entries within the last N days, newest first."""
-    cutoff = (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
+    cutoff = _cutoff(days)
     entries = [
         (v["date"], v.get("headline", ""))
         for v in state.values()

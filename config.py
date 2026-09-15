@@ -180,7 +180,7 @@ BROAD_SEARCH_RESULTS = 3
 # Optional Brave "goggle" (hosted re-ranking/allowlist definition). When set to a
 # goggle URL, it biases results toward a curated source set — e.g. a security-news
 # allowlist. Left empty by default; no goggle is applied unless configured.
-BRAVE_GOGGLES = os.environ.get("BRAVE_GOGGLES", "").strip()
+BRAVE_GOGGLES = _env("BRAVE_GOGGLES").strip()
 
 # ---------------------------------------------------------------------------
 # HTTP fetch tuning

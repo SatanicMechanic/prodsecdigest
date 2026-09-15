@@ -14,6 +14,7 @@ from config import FEEDS, FEED_FETCH_TIMEOUT_SEC, HTTP_USER_AGENT
 from fetchers import entry_published
 
 LOOKBACK_HOURS = 72
+_ROW = "{:<14} {:>6}  {:>5}  {}"  # STATUS, RECENT, TOTAL, TITLE/detail
 
 
 def check_feeds() -> bool:
@@ -27,7 +28,7 @@ def check_feeds() -> bool:
         return False
 
     print(f"Feed health check — lookback {LOOKBACK_HOURS}h\n")
-    print(f"{'STATUS':<14} {'RECENT':>6}  {'TOTAL':>5}  TITLE")
+    print(_ROW.format("STATUS", "RECENT", "TOTAL", "TITLE"))
     print("-" * 72)
 
     for url in FEEDS:
@@ -40,8 +41,8 @@ def check_feeds() -> bool:
             http_status = resp.status_code
             feed = feedparser.parse(io.BytesIO(resp.content))
         except requests.RequestException as exc:
-            print(f"{'DEAD(net)':<14} {'-':>6}  {'-':>5}  {url[:40]}")
-            print(f"{'':14} {'':>6}  {'':>5}  → {exc}")
+            print(_ROW.format("DEAD(net)", "-", "-", url[:40]))
+            print(_ROW.format("", "", "", f"→ {exc}"))
             any_failed = True
             continue
 
@@ -62,9 +63,9 @@ def check_feeds() -> bool:
         else:
             status_str = "OK"
 
-        print(f"{status_str:<14} {recent:>6}  {total:>5}  {title}")
+        print(_ROW.format(status_str, recent, total, title))
         if status_str.startswith("DEAD"):
-            print(f"{'':14} {'':>6}  {'':>5}  → {url}")
+            print(_ROW.format("", "", "", f"→ {url}"))
 
     print()
     if any_failed:

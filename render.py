@@ -83,13 +83,30 @@ def _stack_note(item: dict) -> str:
     return (item.get("stack_match") or "").strip()
 
 
+def _field(item: dict, key: str) -> str:
+    """Case-folded category/severity — the one fold every renderer shares."""
+    return (item.get(key) or "").strip().lower()
+
+
+def _meta_bits(item: dict, esc) -> list[str]:
+    """Source + stack line for the HTML and Slack cards, escaped by `esc`."""
+    bits = []
+    domain = _source_domain(item.get("url", ""))
+    if domain:
+        bits.append(f"Source: {esc(domain)}")
+    stack = _stack_note(item)
+    if stack:
+        bits.append(f"Stack: {esc(stack)}")
+    return bits
+
+
 # ---------------------------------------------------------------------------
 # HTML
 # ---------------------------------------------------------------------------
 
 def _item_card(index: int, item: dict) -> str:
-    cat = (item.get("category") or "").lower()
-    sev = (item.get("severity") or "").lower()
+    cat = _field(item, "category")
+    sev = _field(item, "severity")
     cat_label = _CATEGORY_LABEL.get(cat, _esc(cat.title()))
     sev_label, chip_bg, chip_fg = _SEVERITY_CHIP.get(
         sev, (_esc(sev.title()) or "Unrated", "#475569", "#e2e8f0"))
@@ -99,13 +116,7 @@ def _item_card(index: int, item: dict) -> str:
     action = _esc(item.get("action", ""))
     url = _safe_url(item.get("url", ""))
 
-    meta_bits = []
-    domain = _source_domain(item.get("url", ""))
-    if domain:
-        meta_bits.append(f"Source: {_esc(domain)}")
-    stack = _stack_note(item)
-    if stack:
-        meta_bits.append(f"Stack: {_esc(stack)}")
+    meta_bits = _meta_bits(item, _esc)
     meta_html = ""
     if meta_bits:
         meta_html = f"""
@@ -287,8 +298,8 @@ def render_text(items: list[dict], date_str: str) -> str:
         "",
     ]
     for i, item in enumerate(items, 1):
-        cat = (item.get("category") or "").upper()
-        sev = (item.get("severity") or "").upper()
+        cat = _field(item, "category").upper()
+        sev = _field(item, "severity").upper()
         out.append(f"{i}. [{cat} / {sev}] {item.get('headline','')}")
         out.append("")
         out.append(f"   Do now: {item.get('action','')}")
@@ -324,7 +335,7 @@ def _clip(text: str, limit: int) -> str:
 
 
 def _severity_prefix(items: list[dict]) -> str:
-    severities = {(i.get("severity") or "").lower() for i in items}
+    severities = {_field(i, "severity") for i in items}
     if "critical" in severities:
         return "🛡️🔴"
     if "high" in severities:
@@ -379,8 +390,8 @@ def render_slack(items: list[dict], date_str: str, alert: bool = False) -> dict:
     """
     attachments = []
     for item in items:
-        cat = (item.get("category") or "").lower()
-        sev = (item.get("severity") or "").lower()
+        cat = _field(item, "category")
+        sev = _field(item, "severity")
         cat_label = _CATEGORY_LABEL.get(cat, (cat or "Unrated").title())
         sev_label, color, _ = _SEVERITY_CHIP.get(
             sev, (sev.title() or "Unrated", "#475569", ""))
@@ -410,13 +421,7 @@ def render_slack(items: list[dict], date_str: str, alert: bool = False) -> dict:
             }},
         ]
 
-        meta_bits = []
-        domain = _source_domain(item.get("url", ""))
-        if domain:
-            meta_bits.append(f"Source: {_slack_esc(domain)}")
-        stack = _stack_note(item)
-        if stack:
-            meta_bits.append(f"Stack: {_slack_esc(stack)}")
+        meta_bits = _meta_bits(item, _slack_esc)
         if meta_bits:
             blocks.append({"type": "context", "elements": [{
                 "type": "mrkdwn", "text": "  ·  ".join(meta_bits),

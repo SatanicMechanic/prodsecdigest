@@ -189,6 +189,27 @@ def _no_digest_reason(degraded: list[str], emergency: bool) -> str:
             "Persisting state and exiting.")
 
 
+def _empty_pool_report(lookback_hours: int, rss_stats: dict, search_stats: dict) -> str:
+    """Why there was nothing to triage, from the two fetch funnels.
+
+    "No articles found" alone read the same whether nothing was published,
+    everything was already seen, or search came back empty — on a green run.
+    2026-09-14's Monday run was the first of those and the log couldn't say so.
+    """
+    lines = ["No articles found — nothing to triage. Exiting."]
+    if rss_stats.get("fetched", 0) == 0:
+        lines.append(f"  RSS: no feed entries published in the last {lookback_hours}h.")
+    else:
+        lines.append(f"  RSS: {rss_stats['fetched']} in window"
+                     f" -> {rss_stats['after_state_dedup']} after state dedup"
+                     f" -> {rss_stats['after_blocklist']} after blocklist.")
+    lines.append(f"  Search: {search_stats['fetched']} returned (after age filter)"
+                 f" -> {search_stats['after_rss_dedup']} after RSS dedup"
+                 f" -> {search_stats['after_state_dedup']} after state dedup"
+                 f" -> {search_stats['after_blocklist']} after blocklist.")
+    return "\n".join(lines)
+
+
 def _emergency_filter(items: list) -> list:
     """The out-of-band bar: one critical threat, or nothing.
 
@@ -335,7 +356,7 @@ def run() -> None:
           f"({len(rss_articles)} RSS + {len(search_articles)} web search)")
 
     if not all_articles:
-        print("No articles found. Exiting.")
+        print(_empty_pool_report(lookback_hours, rss_stats, search_stats))
         return
 
     # Record every candidate URL that reached triage. This drives cooldown:

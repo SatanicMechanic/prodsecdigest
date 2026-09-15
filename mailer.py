@@ -50,4 +50,6 @@ def send_email(html_body: str, text_body: str, subject: str) -> None:
         if exc.response is not None:
             detail = f": HTTP {exc.response.status_code} {exc.response.text[:300]}"
         raise RuntimeError(f"Resend delivery failed after retries{detail}") from exc
+    finally:
+        session.close()
     print("Email sent.")

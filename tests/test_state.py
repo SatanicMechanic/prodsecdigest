@@ -199,10 +199,19 @@ def test_recent_sent_headlines_excludes_no_headline(tmp_path, monkeypatch):
 def test_atomic_save_does_not_corrupt_on_error(tmp_path, monkeypatch):
     """save_state uses write-then-rename so a partial file never replaces a good one."""
     monkeypatch.setattr(state, "_state_path", lambda: str(tmp_path / "state.json"))
-    s = {"https://example.com/a": {"status": "sent", "date": "2026-01-01"}}
-    state.save_state(s)
-    assert (tmp_path / "state.json").exists()
+    good = {"https://example.com/a": {"status": "sent", "date": "2026-01-01"}}
+    state.save_state(good)
     assert not (tmp_path / "state.json.tmp").exists()
+
+    # The old version of this test only exercised the happy path.
+    def fail_midway(obj, f, **kw):
+        f.write("{truncated")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(state.json, "dump", fail_midway)
+    with pytest.raises(OSError):
+        state.save_state({"https://example.com/b": {"status": "sent", "date": "2026-01-02"}})
+    assert json.loads((tmp_path / "state.json").read_text()) == good
 
 
 # --- sent_only suppression (emergency re-check) ---

@@ -129,7 +129,7 @@ def test_ground_urls_passes_skip_through():
 
 # --- Emergency re-check bar ---
 
-from digest import _emergency_filter, _no_digest_reason  # noqa: E402
+from digest import _emergency_filter, _no_digest_reason, _empty_pool_report  # noqa: E402
 
 
 @pytest.mark.parametrize("category, severity, count, kept", [
@@ -168,3 +168,20 @@ def test_no_digest_reason(degraded, emergency, present, absent):
     msg = _no_digest_reason(degraded, emergency)
     assert all(s in msg for s in present)
     assert not any(s in msg for s in absent)
+
+
+_NO_SEARCH = {"fetched": 0, "after_rss_dedup": 0, "after_state_dedup": 0, "after_blocklist": 0}
+
+
+@pytest.mark.parametrize("rss, search, present", [
+    # Nothing published: say so, rather than a bare "No articles found".
+    ({"fetched": 0, "after_state_dedup": 0, "after_blocklist": 0}, _NO_SEARCH,
+     ["no feed entries published in the last 72h", "Search: 0 returned"]),
+    # Published but all already seen: the funnel shows where it went.
+    ({"fetched": 5, "after_state_dedup": 0, "after_blocklist": 0},
+     {"fetched": 4, "after_rss_dedup": 3, "after_state_dedup": 0, "after_blocklist": 0},
+     ["RSS: 5 in window -> 0 after state dedup", "Search: 4 returned", "3 after RSS dedup"]),
+])
+def test_empty_pool_report(rss, search, present):
+    msg = _empty_pool_report(72, rss, search)
+    assert all(s in msg for s in present)
