@@ -26,6 +26,19 @@ def test_parse_query_json(raw, expected):
     assert llm.parse_query_json(raw) == expected
 
 
+@pytest.mark.parametrize("name", [
+    "_ANCHORED_QUERY_SYSTEM", "_INDEPENDENT_QUERY_SYSTEM",
+    "_TOOLING_SCAN_QUERY_SYSTEM", "_AI_LAB_QUERY_SYSTEM", "_SLOW_QUERY_SYSTEM",
+])
+def test_query_prompts_share_quoting_and_year_rules(name):
+    """Two prompts had drifted without the no-years rule, and the open-ended
+    quoting rule produced 4-phrase queries that matched nothing (2026-09-14)."""
+    prompt = getattr(llm, name)
+    assert "Do NOT append dates or years" in prompt
+    assert "Quote at most ONE multi-word phrase" in prompt
+    assert "Wrap multi-word exact concepts" not in prompt
+
+
 def test_parse_triage_output_tolerates_fenced_json(monkeypatch):
     """Defense-in-depth: provider regressions to fenced output shouldn't blow up."""
     monkeypatch.setattr(llm, "STACK_SUMMARY", "CI/CD & SCM: GitHub")

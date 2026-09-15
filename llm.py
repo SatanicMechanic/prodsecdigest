@@ -315,8 +315,9 @@ Rules:
   only pulls in search-engine backfill noise. The bar is a concrete thread
   worth pulling, not "the most interesting item of the day".
 - Do NOT append dates or years — recency is handled by the search engine
-- Wrap multi-word exact concepts in double quotes so the search engine matches
-  the phrase, not loose tokens (e.g. "supply chain attack", not supply chain attack)
+- Quote at most ONE multi-word phrase per query (e.g. "supply chain attack") and
+  leave the rest unquoted. Never quote a single word, a name, or a year: every
+  quoted phrase must match verbatim, so each extra one cuts the results
 - Use specific terms: CVE IDs, campaign names, package names, vendor names
 - Each query should target something concrete from the RSS articles
 - Return ONLY a JSON array of strings. No preamble. No explanation. No markdown fences."""
@@ -376,8 +377,9 @@ Rules:
 - Prefer search terms that target urgency and recency implicitly:
   "emergency patch", "actively exploited", "zero-day exploitation",
   "CISA emergency directive", "out-of-band", "mass exploitation"
-- Wrap multi-word exact concepts in double quotes so the search engine matches
-  the phrase, not loose tokens (e.g. "supply chain attack", not supply chain attack)
+- Quote at most ONE multi-word phrase per query (e.g. "actively exploited") and
+  leave the rest unquoted. Never quote a single word, a name, or a year: every
+  quoted phrase must match verbatim, so each extra one cuts the results
 - Do NOT append dates or years — recency is handled by the search engine
 - Return ONLY a JSON array of strings. No preamble. No explanation. No markdown fences."""
 
@@ -411,8 +413,11 @@ Do NOT target:
 - Tutorial, "how to use X", or vendor survey content
 - Routine minor releases
 
-Wrap multi-word exact concepts in double quotes so the search engine matches the
-phrase, not loose tokens (e.g. "software supply chain", not software supply chain).
+Quote at most ONE multi-word phrase per query (e.g. "software supply chain") and
+leave the rest unquoted. Never quote a single word, a name, or a year: every quoted
+phrase must match verbatim, so each extra one cuts the results.
+
+Do NOT append dates or years — recency is handled by the search engine.
 
 Do NOT use search operators: no site:, no after:, no OR chains, no parenthesized
 groups. Operator-stuffed queries degrade into evergreen index/landing pages
@@ -464,8 +469,9 @@ Rules:
 - Generate exactly {{n}} query
 - Anchor the query on one or more named labs above — generic "AI security
   capability" queries do not surface specific releases reliably
-- Wrap multi-word exact concepts in double quotes so the search engine matches
-  the phrase, not loose tokens (e.g. "vulnerability discovery", not vulnerability discovery)
+- Quote at most ONE multi-word phrase per query (e.g. "vulnerability discovery")
+  and leave the rest unquoted. Never quote a single word, a lab name, or a year:
+  every quoted phrase must match verbatim, so each extra one cuts the results
 - Do NOT use search operators: no site:, no after:, and no long OR chains of
   lab names — pick the one or two labs most likely to have news and write a
   plain query. Operator-stuffed queries pull index pages, not articles

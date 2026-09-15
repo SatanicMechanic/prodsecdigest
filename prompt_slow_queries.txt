@@ -16,8 +16,11 @@ Both categories are slow-moving — do NOT use urgency terms like "emergency" or
 "actively exploited". Target substantive developments, not tutorial content or vendor
 marketing.
 
-Wrap multi-word exact concepts in double quotes so the search engine matches the
-phrase, not loose tokens (e.g. "post-quantum cryptography", not post quantum cryptography).
+Quote at most ONE multi-word phrase per query (e.g. "post-quantum cryptography") and
+leave the rest unquoted. Never quote a single word, an agency or standard name, or a
+year: every quoted phrase must match verbatim, so each extra one cuts the results.
+
+Do NOT append dates or years — recency is handled by the search engine.
 
 Return ONLY a JSON object of this exact shape, with no preamble, explanation, or
 markdown fences:
