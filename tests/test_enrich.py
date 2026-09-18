@@ -158,6 +158,37 @@ def test_enrich_items_rewrites_why_and_action(monkeypatch):
     assert out[0]["url"] == "https://example.com/story"
 
 
+def test_enrich_items_keeps_originals_when_flagged_out_of_scope(monkeypatch):
+    """Enrichment may disagree with the pick, but it may not ship that disagreement.
+
+    2026-09-18: the enrichment pass rewrote why/action into "this item is out of
+    scope / no action required" and the digest mailed it as a HIGH TOOLING
+    UPDATE card that argued with its own headline.
+    """
+    monkeypatch.setattr(fetchers, "fetch_article_text", lambda url: _LONG_TEXT)
+    monkeypatch.setattr(
+        llm, "call_llm",
+        lambda *a, **k: json.dumps({
+            "why": "This is out of scope for our security digest.",
+            "action": "No action required.",
+            "in_scope": False,
+        }))
+    out = llm.enrich_items([_item()])
+    assert out[0]["why"] == "original why"
+    assert out[0]["action"] == "original action"
+    # The item is still delivered: selection is triage's call, not enrichment's.
+    assert len(out) == 1
+
+
+def test_enrich_items_rewrites_when_in_scope_absent(monkeypatch):
+    """Back-compat: a response without the flag is a normal refinement."""
+    monkeypatch.setattr(fetchers, "fetch_article_text", lambda url: _LONG_TEXT)
+    monkeypatch.setattr(
+        llm, "call_llm",
+        lambda *a, **k: json.dumps({"why": "better why", "action": "better action"}))
+    assert llm.enrich_items([_item()])[0]["why"] == "better why"
+
+
 def test_enrich_items_keeps_originals_when_article_unusable(monkeypatch):
     monkeypatch.setattr(fetchers, "fetch_article_text", lambda url: "short")
     monkeypatch.setattr(

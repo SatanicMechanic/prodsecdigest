@@ -59,6 +59,10 @@ BLOCKLIST_DOMAINS: list[str] = [
     "okx.com",        # crypto exchange / price pages, never prodsec
     "stocktwits.com", # retail-stock sentiment, never prodsec
     "youtube.com",    # video content; triage can only read the title
+    # Content farms: scraped/rewritten tech news, invented product detail,
+    # no primary reporting. They rank well on fresh-sounding queries and
+    # a capability claim sourced from one cannot be checked at all.
+    "zoombangla.com",
 ]
 
 # Full-URL regex patterns (matched case-insensitively against the whole link).
@@ -168,7 +172,17 @@ MAX_SEARCH_QUERIES = 6      # anchored (1) + independent (5); compliance/PQC/too
 COMPLIANCE_QUERIES = 1  # separate from MAX_SEARCH_QUERIES
 PQC_QUERIES = 1
 TOOLING_SCAN_QUERIES = 1  # cloud/CI/CD platform features + engineering security write-ups; separate from MAX_SEARCH_QUERIES
-AI_LAB_QUERIES = 1  # major AI lab security-capability releases (Anthropic, OpenAI, DeepMind, etc.); separate slot so it's not crowded out by general tooling
+# AI systems doing vulnerability research. Two queries, not one: the slot has to
+# cover frontier labs AND the open-weight/harness side (open-weight model
+# families, agentic pentest and CTF harnesses, eval benchmarks), and a single
+# lab-anchored query never reached the second half. Separate from
+# MAX_SEARCH_QUERIES so general tooling can't crowd it out.
+AI_LAB_QUERIES = 2
+# Press coverage of the reader's OWN products. Separate slot because no other
+# query looks for it: the urgency-biased independent queries only surface an
+# own-product story once it is being actively exploited, which is exactly the
+# threshold a stack-summary OVERRIDE line exists to bypass.
+OWN_PRODUCT_QUERIES = 1
 MAX_SEARCH_RESULTS = 5      # Brave results fetched per query (default / focused)
 # Abstract horizon-scan queries (independent urgency phrases, compliance, PQC)
 # have far fewer than 5 genuine fresh matches on a normal day, so Brave backfills

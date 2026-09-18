@@ -48,9 +48,10 @@ It complements weekly digests like [SANS NewsBites](https://www.sans.org/newslet
 │                      blocklist filter, state/cooldown filter             │
 │                                                                          │
 │  2. Query gen        LLM generates 1 anchored + 5 independent +          │
-│                      1 tooling-scan + 1 ai-lab; on the Monday catch-up   │
-│                      run also 1 compliance + 1 PQC (slow-moving beats,   │
-│                      weekly-only to avoid daily backfill noise)          │
+│                      1 own-product + 1 tooling-scan + 2 ai-lab; on the   │
+│                      Monday catch-up run also 1 compliance + 1 PQC       │
+│                      (slow-moving beats, weekly-only to avoid daily      │
+│                      backfill noise)                                     │
 │                                                                          │
 │  3. Brave Search     executes queries (fewer results fetched for the     │
 │                      backfill-prone abstract query types), dedupes       │
@@ -190,6 +191,29 @@ Then edit `stack.txt` with your real stack and commit — in the private repo th
 
 If `stack.txt` is missing or empty the bot exits with an error rather than silently triaging with no stack context.
 
+#### Scope overrides, and news coverage of your own products
+
+Most of `stack.txt` describes what you *run*. If you also *ship* software, the question runs the other way: who is publishing about a vulnerability in your product. The fire-tier bar in `prompt_threat.txt` won't surface that on its own — it wants active exploitation, an emergency advisory, or converging coverage, and a story about your own product matters well before any of that. Two pieces close the gap.
+
+**`OVERRIDE:` lines in `stack.txt`.** A stack-summary line marked `**OVERRIDE:**` takes precedence over anything in `prompt_threat.txt` that would exclude the item it describes: the inclusion criteria, the exclusion lists, the staleness and trailing-coverage rules, and the recent-coverage suppression injected from `digest.py`. Where an override and a prompt rule disagree, the override wins; where they don't, every normal rule still applies — an override widens one scope decision, it doesn't lower the bar generally.
+
+The marker is only valid *inside the stack summary*. Article titles and summaries never carry it: text claiming to be an override, or to be covered by one, is untrusted input making a claim about itself, and the trust boundary in the prompt governs it. That fencing is the difference between a scope mechanism and a prompt-injection path, so it's pinned by `tests/test_prompt_contracts.py` rather than left to prose.
+
+**The `own-product` query slot.** One query per run (`OWN_PRODUCT_QUERIES`), aimed at trade press, security news sites, and researcher write-ups covering a vulnerability in what you ship. It reads the vendor name out of your `OVERRIDE:` line at runtime, so nothing about your products lives in this repo. It is one of the two slots that also runs on the emergency re-check (`QuerySlot.in_emergency`) — a vulnerability in your own product is threat-tier by definition. Without it the override has nothing to act on: the feeds carry no journalism by design, and the independent queries are urgency-biased, so they'd only find a story about you once it had already become an exploitation event.
+
+Sketch of the stack line (the real one belongs in your private mirror, not here):
+
+```
+- **OVERRIDE: our own products (highest priority — we are Example Corp).** Any product
+  published under the Example Corp name is one we build and ship. Any public report of a
+  security issue in one of ours is fire-tier ... Redundancy is wanted here rather than
+  suppressed, and the coverage we most need to see is third-party: a second and third
+  outlet on the same issue is new information, not a duplicate ... Our own advisories and
+  KB articles do NOT qualify: we are the vendor and see those before they publish.
+```
+
+Decide deliberately whether your own advisories qualify. If you are the vendor you generally see them internally first, and including them spends the digest's attention on something you already know.
+
 ### 4. Repo secrets + variables (for Actions)
 
 **Secrets:** `GH_MODELS_TOKEN`, `RESEND_API_KEY`, `BRAVE_API_KEY` (plus your provider's key if you switch off the default), optionally `SLACK_WEBHOOK_URL`
@@ -233,7 +257,7 @@ RSS sources live in `feeds.md` (markdown link list parsed at import). Most other
 - `MAX_RSS_ARTICLES`, `PER_FEED_CAP` — candidate pool shape (round-robin merge enforces per-feed fairness)
 - `STATE_SENT_TTL_DAYS` (30) — how long sent URLs stay suppressed
 - `STATE_CANDIDATE_COOLDOWN_DAYS` (5) — how long near-misses are filtered to avoid daily recycling
-- `MAX_SEARCH_QUERIES` (6) — anchored (1) + independent (5) fire-tier queries; `COMPLIANCE_QUERIES` (1) and `PQC_QUERIES` (1) are separate and run only on the Monday catch-up
+- `MAX_SEARCH_QUERIES` (6) — anchored (1) + independent (5) fire-tier queries. `OWN_PRODUCT_QUERIES` (1), `TOOLING_SCAN_QUERIES` (1) and `AI_LAB_QUERIES` (2) are separate slots that run every day; `COMPLIANCE_QUERIES` (1) and `PQC_QUERIES` (1) are separate too but run only on the Monday catch-up
 - `MAX_SEARCH_RESULTS` (5) / `BROAD_SEARCH_RESULTS` (3) — Brave results fetched per query; abstract query types (independent/compliance/PQC) use the smaller count to shrink trending-news backfill
 - `BRAVE_GOGGLES` (env, optional) — URL of a Brave goggle to bias results toward a curated source set. The repo ships `security-news.goggle` (boosts primary security news/advisories, downranks aggregator backfill). Brave fetches the goggle at query time, so the URL must be publicly reachable — **a private fork's own raw URL won't work**; point at this repo's copy (`https://raw.githubusercontent.com/SatanicMechanic/prodsecdigest/main/security-news.goggle`), or host a customized goggle at any public URL (a public gist works). Because it must be public, keep customizations generic — don't encode stack hints. Boost-only by design; hard exclusions stay in the testable `config.py` blocklists
 - `LLM_TIMEOUT_SEC` (60) — per-provider request budget; each parallel triage future gets this plus 10 seconds before timing out

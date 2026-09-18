@@ -23,7 +23,7 @@ from config import (
     LLM_BASE_URL, LLM_MODEL, LLM_API_KEY_ENV, LLM_EXTRA,
     LLM_TIMEOUT_SEC,
     MAX_SEARCH_QUERIES, COMPLIANCE_QUERIES, PQC_QUERIES, TOOLING_SCAN_QUERIES,
-    AI_LAB_QUERIES, MAX_SEARCH_RESULTS, BROAD_SEARCH_RESULTS,
+    AI_LAB_QUERIES, OWN_PRODUCT_QUERIES, MAX_SEARCH_RESULTS, BROAD_SEARCH_RESULTS,
 )
 
 
@@ -151,11 +151,28 @@ def _str_list(value) -> list[str]:
 
 
 def parse_query_json(raw: str) -> list[str]:
-    """Parse a JSON array of query strings from LLM output."""
+    """Parse query strings from LLM output.
+
+    json_mode forces a JSON object, so the query prompts ask for
+    {"queries": [...]}. A bare array is still accepted: it costs one line and
+    any provider without json_object support will send one.
+
+    A slot that legitimately found nothing to ask used to be indistinguishable
+    from a slot whose output we failed to parse — both returned [] in silence,
+    so a run could lose its entire threat-discovery pass without a word in the
+    log. An explicit empty list stays quiet; anything else that yields zero
+    queries says so.
+    """
     try:
-        return _str_list(json.loads(_strip_fences(raw)))
+        data = json.loads(_strip_fences(raw))
     except json.JSONDecodeError:
+        print(f"Warning: query generation returned unparseable JSON: {raw[:200]!r}")
         return []
+    queries = data.get("queries") if isinstance(data, dict) else data
+    parsed = _str_list(queries)
+    if not parsed and queries != []:
+        print(f"Warning: query generation returned no usable queries: {raw[:200]!r}")
+    return parsed
 
 
 # A real CVE ID is CVE-YYYY-NNNN+ (4+ digits). Anything shaped like a CVE
@@ -278,7 +295,7 @@ def _generate_queries(system: str, ask: str, lookback_hours: int, n: int,
         f"{ask}"
     )
     try:
-        raw = call_llm(system, user, temperature=temperature)
+        raw = call_llm(system, user, temperature=temperature, json_mode=True)
     except Exception as exc:
         # A blip during query generation must not abort the run: the search
         # stage already tolerates an empty spec list, and the RSS pool is
@@ -311,7 +328,7 @@ Look for:
 
 Rules:
 - Generate at most {{n}} queries. If nothing in today's RSS genuinely warrants
-  deeper coverage, return an empty array [] — a forced query on a quiet day
+  deeper coverage, return {{"queries": []}} — a forced query on a quiet day
   only pulls in search-engine backfill noise. The bar is a concrete thread
   worth pulling, not "the most interesting item of the day".
 - Do NOT append dates or years — recency is handled by the search engine
@@ -320,7 +337,8 @@ Rules:
   quoted phrase must match verbatim, so each extra one cuts the results
 - Use specific terms: CVE IDs, campaign names, package names, vendor names
 - Each query should target something concrete from the RSS articles
-- Return ONLY a JSON array of strings. No preamble. No explanation. No markdown fences."""
+- Return ONLY a JSON object of this exact shape, with no preamble, explanation, or
+  markdown fences: {{"queries": ["query1", ...]}}"""
 
 
 def generate_anchored_queries(rss_articles: list[dict]) -> list[str]:
@@ -337,7 +355,7 @@ def generate_anchored_queries(rss_articles: list[dict]) -> list[str]:
         f"or [] if nothing warrants follow-up."
     )
     try:
-        raw = call_llm(system, user, temperature=0.2)
+        raw = call_llm(system, user, temperature=0.2, json_mode=True)
     except Exception as exc:
         print(f"Warning: anchored query generation failed ({exc}); continuing without them.")
         return []
@@ -381,7 +399,8 @@ Rules:
   leave the rest unquoted. Never quote a single word, a name, or a year: every
   quoted phrase must match verbatim, so each extra one cuts the results
 - Do NOT append dates or years — recency is handled by the search engine
-- Return ONLY a JSON array of strings. No preamble. No explanation. No markdown fences."""
+- Return ONLY a JSON object of this exact shape, with no preamble, explanation, or
+  markdown fences: {{"queries": ["query1", ...]}}"""
 
 
 # Kept separate from the urgency-biased independent slot so platform/research
@@ -424,8 +443,8 @@ groups. Operator-stuffed queries degrade into evergreen index/landing pages
 (vendor homepages, blog roots, release-note indexes) instead of articles. Write
 one plain natural-language query; recency is handled by the search engine.
 
-Return ONLY a JSON array of exactly {{n}} query string(s).
-No preamble. No explanation. No markdown fences."""
+Return ONLY a JSON object of this exact shape, with no preamble, explanation, or
+markdown fences: {{"queries": ["query1", ...]}}"""
 
 
 # ---------------------------------------------------------------------------
@@ -438,23 +457,28 @@ No preamble. No explanation. No markdown fences."""
 # producing generic "AI security" queries that surface nothing specific.
 
 _AI_LAB_QUERY_SYSTEM = f"""You are a product security engineer generating {{n}} web search
-query to surface new SECURITY-RELEVANT capability releases from major AI labs in
-the last {{lookback_hours}} hours.
+queries to surface AI systems that do VULNERABILITY RESEARCH, and what they have
+been shown to do, in the last {{lookback_hours}} hours.
 
-In-scope labs: Anthropic, OpenAI, Google DeepMind, xAI, Meta AI, Mistral AI.
+Two sides, both in scope:
+- Frontier / closed-weight labs: Anthropic, OpenAI, Google DeepMind, xAI,
+  Meta AI, Mistral AI
+- Open-weight models and the harnesses built on them: named open-weight
+  families (Llama, Qwen, DeepSeek, Mistral, gpt-oss and successors), security
+  fine-tunes of them, agentic pentest and bug-bounty systems, CTF and fuzzing
+  agents, and the benchmarks that measure them (CVE-Bench, Cybench and similar)
 
 Stack context (for relevance filtering):
 {STACK_SUMMARY}
 
 Target:
-- New model releases with demonstrated cyber capabilities — autonomous
-  vulnerability discovery, exploit chain construction, mass scanning, defensive
-  automation
-- Lab-published red-team or evaluation results showing what their models can do
-  offensively or defensively (e.g. AISI evaluations, lab safety/preview cards
-  reporting cyber-capability metrics)
-- Coordinated vulnerability disclosure programs run by labs (e.g. lab-driven
-  disclosures of vulnerabilities the lab's own model discovered)
+- Models, agents, or harnesses demonstrating autonomous vulnerability
+  discovery, exploit-chain construction, or automated patching
+- Real bugs found and disclosed by an AI system: lab-run disclosure programs,
+  bug-bounty results, CVEs credited to an agent
+- Published red-team or evaluation results carrying concrete cyber-capability
+  metrics — from a lab, an academic group, or an independent evaluator
+- Open-source releases of a vulnerability-research agent, harness, or benchmark
 - Safety or security framework changes that materially affect deployment
   expectations for these models
 
@@ -464,20 +488,76 @@ Do NOT target:
 - Routine model version bumps with no capability change
 - Consumer-product feature launches (chat UI, app launches)
 - Generic "AI in security" trend pieces
+- Capability claims with no artifact behind them — no disclosed bug, no
+  benchmark result, no technical write-up
 
 Rules:
-- Generate exactly {{n}} query
-- Anchor the query on one or more named labs above — generic "AI security
-  capability" queries do not surface specific releases reliably
+- Generate exactly {{n}} queries
+- Split them: the first anchored on one or two of the named frontier labs
+  above; the second on the open-weight or harness side — a named open-weight
+  family, a named harness or benchmark, or plain terms such as autonomous
+  exploit agent. If {{n}} is 1, use the frontier-lab form
 - Quote at most ONE multi-word phrase per query (e.g. "vulnerability discovery")
   and leave the rest unquoted. Never quote a single word, a lab name, or a year:
   every quoted phrase must match verbatim, so each extra one cuts the results
 - Do NOT use search operators: no site:, no after:, and no long OR chains of
-  lab names — pick the one or two labs most likely to have news and write a
+  lab or model names — pick the one or two most likely to have news and write a
   plain query. Operator-stuffed queries pull index pages, not articles
 - Do NOT append dates or years — recency is handled by the search engine
-- Return ONLY a JSON array of {{n}} query string(s). No preamble.
-  No explanation. No markdown fences."""
+- Return ONLY a JSON object of this exact shape, with no preamble, explanation, or
+  markdown fences: {{"queries": ["query1", ...]}}"""
+
+
+# ---------------------------------------------------------------------------
+# Query generation — Pass 1f: press coverage of the reader's own products
+# ---------------------------------------------------------------------------
+# Every other slot looks outward at the ecosystem. This one looks back at the
+# reader: what the trade press is publishing about vulnerabilities in what the
+# reader's own organization ships. Nothing else surfaces it — the independent
+# slot is urgency-biased, so it only finds an own-product story once that story
+# is already an exploitation event, and the feeds deliberately carry no
+# journalism at all.
+
+_OWN_PRODUCT_QUERY_SYSTEM = f"""You are a product security engineer generating {{n}} web search
+queries to find what the press has published about security issues in the products
+the reader's OWN organization builds and ships, in the last {{lookback_hours}} hours.
+
+The stack summary below says which products those are. A line marked OVERRIDE is
+the authoritative answer; take the vendor name from it, along with any former or
+predecessor names it gives, and anchor every query on that name:
+{STACK_SUMMARY}
+
+Target:
+- Trade press, security news sites, and researcher write-ups covering a
+  vulnerability, advisory, exploit, or breach in one of those products
+- Coverage that has escalated: another outlet picking the story up, a CVE in one
+  of these products tied to exploitation, a researcher publishing details or a PoC
+- Repeat and trailing coverage counts here. The reader needs to know who is
+  writing about them and how hard, so a story other outlets already covered is
+  still worth surfacing
+
+Do NOT target:
+- The vendor's own advisories, KB articles, bulletins, or release notes. The
+  reader IS the vendor and already has those internally — a query that returns
+  the vendor's own site has found nothing the reader did not know
+- Product marketing, funding, earnings, analyst rankings, or partnership news
+- Generic industry commentary that names none of these products
+- Competitor products, or the platforms and ecosystems these products run on —
+  other slots cover those
+
+Rules:
+- Generate exactly {{n}} queries
+- Anchor every query on the vendor name from the stack summary paired with a
+  security term (vulnerability, CVE, advisory, exploited, flaw). A query with no
+  vendor name in it belongs to a different slot
+- Quote at most ONE multi-word phrase per query (e.g. "actively exploited") and
+  leave the rest unquoted. Never quote a single word, a vendor name, or a year:
+  every quoted phrase must match verbatim, so each extra one cuts the results
+- Do NOT use search operators: no site:, no after:, no OR chains. Operator-stuffed
+  queries pull index pages, not articles
+- Do NOT append dates or years — recency is handled by the search engine
+- Return ONLY a JSON object of this exact shape, with no preamble, explanation, or
+  markdown fences: {{"queries": ["query1", ...]}}"""
 
 
 # ---------------------------------------------------------------------------
@@ -485,7 +565,7 @@ Rules:
 # ---------------------------------------------------------------------------
 # These slots differ only in prompt, count, temperature, how the ask sentence
 # ends, and how many Brave results each query is worth — so they are a table,
-# not three near-identical functions. The anchored slot (needs the RSS pool)
+# not four near-identical functions. The anchored slot (needs the RSS pool)
 # and the slow-beat pair (one call, two lists) keep their own functions.
 
 class QuerySlot(NamedTuple):
@@ -495,19 +575,26 @@ class QuerySlot(NamedTuple):
     temperature: float
     target: str       # completes "Generate N search quer(y|ies) targeting ..."
     n_results: int    # Brave results fetched per query from this slot
+    in_emergency: bool  # runs on the emergency re-check, which is threats-only
 
 
 QUERY_SLOTS = (
     QuerySlot("independent", _INDEPENDENT_QUERY_SYSTEM, INDEPENDENT_QUERIES, 0.4,
               "security events that are actively unfolding right now",
-              BROAD_SEARCH_RESULTS),
+              BROAD_SEARCH_RESULTS, in_emergency=True),
+    # A vulnerability in what the reader ships is threat-tier by definition, so
+    # this is the one non-urgency slot the emergency re-check still pays for.
+    QuerySlot("own-product", _OWN_PRODUCT_QUERY_SYSTEM, OWN_PRODUCT_QUERIES, 0.3,
+              "press coverage of security issues in the reader's own products "
+              "in this window",
+              MAX_SEARCH_RESULTS, in_emergency=True),
     QuerySlot("tooling-scan", _TOOLING_SCAN_QUERY_SYSTEM, TOOLING_SCAN_QUERIES, 0.3,
               "notable new platform security capabilities or engineering security "
               "write-ups in this window",
-              MAX_SEARCH_RESULTS),
+              MAX_SEARCH_RESULTS, in_emergency=False),
     QuerySlot("ai-lab", _AI_LAB_QUERY_SYSTEM, AI_LAB_QUERIES, 0.3,
-              "new security-relevant capability releases from major AI labs in this window",
-              MAX_SEARCH_RESULTS),
+              "AI systems doing vulnerability research in this window — frontier labs on one query, open-weight models or agentic harnesses on the other",
+              MAX_SEARCH_RESULTS, in_emergency=False),
 )
 
 
@@ -622,8 +709,16 @@ Rules:
 - If the article text contradicts the original fields, correct them.
 - If the article text is unusable (paywall stub, cookie wall, wrong page),
   return the original fields unchanged.
-- Return ONLY a JSON object: {{"why": "...", "action": "..."}}. No markdown
-  fences. No preamble."""
+- The item has ALREADY been selected, and that decision is not yours to
+  revisit. Never write a rejection into these two fields: no "out of scope",
+  no "no action required, this does not qualify", no restating our scope
+  rules back at the reader. These fields are rendered as a delivered item, so
+  a rejection written there ships as a card that argues with itself.
+- If the article text convinces you the item should not have been selected,
+  report that in "in_scope": false and return the ORIGINAL why and action
+  unchanged. Do not put your reasoning into them.
+- Return ONLY a JSON object: {{"why": "...", "action": "...",
+  "in_scope": true}}. No markdown fences. No preamble."""
 
 
 def enrich_items(items: list[dict]) -> list[dict]:
@@ -655,6 +750,15 @@ def enrich_items(items: list[dict]) -> list[dict]:
             )
             raw = call_llm(_ENRICH_SYSTEM, user, temperature=0.15, json_mode=True)
             data = json.loads(_strip_fences(raw))
+            if data.get("in_scope") is False:
+                # Enrichment refines the explanation; it does not re-litigate
+                # the pick. A model that disagreed with the selection used to
+                # write that disagreement into why/action, and it shipped as a
+                # delivered item whose own text said it did not belong
+                # (2026-09-18). Selection stands; the disagreement goes here.
+                print(f"Enrichment flagged the item as out of scope; selection "
+                      f"stands, keeping originals: {item.get('headline', url)!r}")
+                continue
             why = data.get("why")
             action = data.get("action")
             if (isinstance(why, str) and why.strip()

@@ -299,10 +299,9 @@ def run() -> None:
     for q in anchored:
         print(f"  [anchored] → {q}")
 
-    # tooling-scan and ai-lab cannot produce a fire-tier threat, so the
-    # emergency re-check pays for neither.
-    active_slots = [s for s in QUERY_SLOTS
-                    if not emergency or s.label == "independent"]
+    # The emergency re-check is threats-only, so it runs just the slots that can
+    # produce one (see QuerySlot.in_emergency): tooling-scan and ai-lab cannot.
+    active_slots = [s for s in QUERY_SLOTS if not emergency or s.in_emergency]
     slot_specs: dict[str, list[dict]] = {}
     for slot in active_slots:
         print(f"Generating {slot.n_queries} {slot.label} queries...")
@@ -341,6 +340,7 @@ def run() -> None:
     query_specs = (
         _specs("anchored", anchored, MAX_SEARCH_RESULTS)
         + slot_specs.get("independent", [])
+        + slot_specs.get("own-product", [])
         + _specs("compliance", compliance, BROAD_SEARCH_RESULTS)
         + _specs("pqc", pqc, BROAD_SEARCH_RESULTS)
         + slot_specs.get("tooling-scan", [])
@@ -389,7 +389,9 @@ def run() -> None:
             "timelines; retrospective analysis or post-mortems. Re-cover ONLY if the "
             "new article reports a genuinely distinct attack vector, a previously "
             "unaffected ecosystem newly drawn in (not 'more victims in the same "
-            "ecosystem'), or a vendor-confirmed material change to remediation guidance.\n\n"
+            "ecosystem'), or a vendor-confirmed material change to remediation "
+            "guidance — or if a stack-summary OVERRIDE line exempts this class of "
+            "item from re-coverage suppression.\n\n"
             f"Already covered:\n{lines}\n\n"
         )
 
@@ -456,6 +458,7 @@ def run() -> None:
         f" -> {search_stats['after_blocklist']} after blocklist\n"
         f"Queries: {len(anchored)} anchored,"
         f" {len(slot_specs.get('independent', []))} independent,"
+        f" {len(slot_specs.get('own-product', []))} own-product,"
         f" {len(compliance)} compliance, {len(pqc)} pqc,"
         f" {len(slot_specs.get('tooling-scan', []))} tooling-scan,"
         f" {len(slot_specs.get('ai-lab', []))} ai-lab\n"

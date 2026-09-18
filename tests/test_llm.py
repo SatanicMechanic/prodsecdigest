@@ -21,14 +21,38 @@ import llm
     ("not json at all", []),
     ("{}", []),
     ("", []),
+    # json_mode forces an object, so this is now the shape the prompts ask for.
+    ('{"queries": ["a", "b"]}', ["a", "b"]),
+    ('```json\n{"queries": ["a"]}\n```', ["a"]),
+    ('{"queries": []}', []),  # "nothing worth asking today" is a real answer
+    ('{"queries": "a"}', []),  # a bare string is not a list here either
+    ('{"search_queries": ["a"]}', []),  # wrong key is a miss, not a silent pass
 ])
 def test_parse_query_json(raw, expected):
     assert llm.parse_query_json(raw) == expected
 
 
+@pytest.mark.parametrize("raw, expect_warning", [
+    ('{"queries": []}', False),   # explicit empty list: the model answered
+    ('{"queries": ["a"]}', False),
+    ('{"search_queries": ["a"]}', True),   # output we could not use
+    ("not json at all", True),
+])
+def test_parse_query_json_reports_lost_output(raw, expect_warning, capsys):
+    """A slot that silently yields no queries costs a run its whole search pass.
+
+    Before this, an unparseable response and a legitimate "nothing to ask"
+    both returned [] without a word in the log (2026-09-17: the anchored slot
+    produced zero queries on six consecutive runs, invisibly).
+    """
+    llm.parse_query_json(raw)
+    assert ("Warning:" in capsys.readouterr().out) is expect_warning
+
+
 @pytest.mark.parametrize("name", [
     "_ANCHORED_QUERY_SYSTEM", "_INDEPENDENT_QUERY_SYSTEM",
     "_TOOLING_SCAN_QUERY_SYSTEM", "_AI_LAB_QUERY_SYSTEM", "_SLOW_QUERY_SYSTEM",
+    "_OWN_PRODUCT_QUERY_SYSTEM",
 ])
 def test_query_prompts_share_quoting_and_year_rules(name):
     """Two prompts had drifted without the no-years rule, and the open-ended
@@ -36,6 +60,9 @@ def test_query_prompts_share_quoting_and_year_rules(name):
     prompt = getattr(llm, name)
     assert "Do NOT append dates or years" in prompt
     assert "Quote at most ONE multi-word phrase" in prompt
+    # json_mode sends response_format=json_object, which cannot return a bare
+    # array — a prompt still asking for one parses back as zero queries.
+    assert "Return ONLY a JSON object" in prompt
     assert "Wrap multi-word exact concepts" not in prompt
 
 
@@ -224,6 +251,14 @@ def test_generate_slow_queries_caps_to_configured_counts(monkeypatch):
 
 _SLOTS = {s.label: s for s in llm.QUERY_SLOTS}
 _LABELS = list(_SLOTS)
+
+
+def test_emergency_recheck_runs_only_threat_capable_slots():
+    """The re-check is threats-only and pays per query, so it runs the two slots
+    that can produce a threat: the urgency scan, and coverage of a vulnerability
+    in what the reader themselves ships."""
+    assert [s.label for s in llm.QUERY_SLOTS if s.in_emergency] == [
+        "independent", "own-product"]
 
 
 @pytest.mark.parametrize("label", _LABELS)
