@@ -167,8 +167,14 @@ def record_candidates(state: dict, urls: list[str]) -> None:
         state[norm] = {"status": "candidate", "date": today}
 
 
-def record_sent(state: dict, urls: list[str], headline: str = "") -> None:
-    """Mark URLs as delivered. Always overwrites prior status."""
+def record_sent(state: dict, urls: list[str], headline: str = "",
+                partial: bool = False) -> None:
+    """Mark URLs as delivered. Always overwrites prior status.
+
+    partial=True marks a delivery made while threat triage was down. The URL is
+    still suppressed, but it does not count as the day's digest (sent_today),
+    so the afternoon run keeps the full bar instead of critical-only.
+    """
     today = _today()
     for url in urls:
         if not url:
@@ -177,6 +183,8 @@ def record_sent(state: dict, urls: list[str], headline: str = "") -> None:
         entry: dict = {"status": "sent", "date": today}
         if headline:
             entry["headline"] = headline
+        if partial:
+            entry["partial"] = True
         state[norm] = entry
 
 
@@ -185,6 +193,7 @@ def sent_today(state: dict) -> bool:
     today = _today()
     return any(
         v.get("status") == "sent" and v.get("date") == today
+        and not v.get("partial")
         for v in state.values()
     )
 

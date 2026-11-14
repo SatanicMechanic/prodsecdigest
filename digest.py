@@ -252,6 +252,27 @@ def _fail_on_total_triage_failure(threat_exc: Exception | None,
     )
 
 
+def _threat_degraded(degraded: list[str]) -> list[str]:
+    """The degraded reasons that belong to the threat call (labels are prefixed)."""
+    return [d for d in degraded if d.startswith("threat")]
+
+
+def _fail_on_threat_degraded(degraded: list[str]) -> None:
+    """A broken threat triage must turn the run red, not end as a quiet exit 0.
+
+    The threat call is the one that finds fires, and a clean-looking SKIP or a
+    tooling-only digest hides that it never ran. Raised only after state is
+    saved and any partial digest is delivered, so the failure costs nothing
+    extra. A tooling-only gap is low-stakes and stays green.
+    """
+    bad = _threat_degraded(degraded)
+    if bad:
+        raise RuntimeError(
+            f"Threat triage degraded — this run is not a clean result: "
+            f"{'; '.join(bad)}."
+        )
+
+
 def get_lookback_hours() -> int:
     """72 hours on Monday (covers the weekend), 24 hours otherwise.
 
@@ -362,11 +383,6 @@ def run() -> None:
     if not all_articles:
         print(_empty_pool_report(lookback_hours, rss_stats, search_stats))
         return
-
-    # Record every candidate URL that reached triage. This drives cooldown:
-    # near-misses won't recycle into the pool every day. Sent URLs later
-    # override this with a longer TTL.
-    record_candidates(state, [a["link"] for a in all_articles])
 
     # --- Load and interpolate analyst prompts ---
     today_str = datetime.date.today().strftime("%B %d, %Y")
@@ -520,14 +536,23 @@ def run() -> None:
     items_threat = _parse_and_ground(raw_threat, "Threat")
     items_tooling = [] if emergency else _parse_and_ground(raw_tooling, "Tooling")
 
+    # Cooldown records "a model judged this and passed", so it is written only
+    # after a clean triage. Recording before the call buried every story from a
+    # failed run for 5 days without anyone having read it. Sent URLs below
+    # override this with a longer TTL.
+    if not degraded:
+        record_candidates(state, [a["link"] for a in all_articles])
+
     items = _merge_triage_results(items_threat, items_tooling, emergency)
     if not items:
         print(_no_digest_reason(degraded, emergency))
         save_state(state)
+        _fail_on_threat_degraded(degraded)
         return
+    threat_degraded = _threat_degraded(degraded)
     if degraded:
-        # Partial failure that still delivered: worth seeing in the log even
-        # though the run is green.
+        # Partial failure that still delivered. A tooling-only gap stays green;
+        # a threat gap fails the run after delivery (see below).
         print(f"Note: delivering a partial digest — {'; '.join(degraded)}.")
 
     # --- Second-pass enrichment ---
@@ -558,10 +583,12 @@ def run() -> None:
     for item in items:
         url = item.get("url")
         if url:
-            record_sent(state, [url], headline=item.get("headline", ""))
+            record_sent(state, [url], headline=item.get("headline", ""),
+                        partial=threat_degraded)
             sent_count += 1
     save_state(state)
     print(f"Recorded {sent_count} sent URLs. State now: {len(state)} entries.")
+    _fail_on_threat_degraded(degraded)
 
 
 if __name__ == "__main__":

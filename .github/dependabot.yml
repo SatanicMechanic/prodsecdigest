@@ -13,6 +13,16 @@ updates:
       interval: "weekly"
     commit-message:
       prefix: "ci"
+    # One PR per run: sibling workflow-editing PRs can't auto-merge via GITHUB_TOKEN.
+    # Minor/patch only, so a major (held for review here) opens separately and
+    # doesn't block the rest of the group.
+    groups:
+      actions:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "pip"
     directory: "/"

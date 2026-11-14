@@ -202,3 +202,59 @@ from digest import get_lookback_hours  # noqa: E402
 def test_lookback_follows_digest_day(freeze_utc, now, hours):
     freeze_utc(now)
     assert get_lookback_hours() == hours
+
+
+# --- run(): a failed threat triage must not poison cooldown or exit green ---
+
+from digest import _fail_on_threat_degraded  # noqa: E402
+
+
+def test_fail_on_threat_degraded_only_for_threat_reasons():
+    _fail_on_threat_degraded([])
+    _fail_on_threat_degraded(["tooling triage call failed"])  # low-stakes: stays green
+    with pytest.raises(RuntimeError, match="Threat triage degraded"):
+        _fail_on_threat_degraded(["tooling triage call failed",
+                                  "threat triage returned unparseable JSON"])
+
+
+def _run_with(monkeypatch, tmp_path, threat_raw, tooling_raw):
+    """Drive digest.run() with one RSS candidate and canned LLM answers
+    (an Exception instance is raised instead of returned)."""
+    import digest
+
+    saved: list = []
+    article = {"title": "t", "link": "https://ex.com/a", "source": "s",
+               "published": "now", "summary": "x"}
+    rss_stats = {"fetched": 1, "after_state_dedup": 1, "after_blocklist": 1,
+                 "after_cross_feed_dedup": 1}
+
+    def fake_llm(system, user, **kw):
+        out = threat_raw if "prompt_threat" in system else tooling_raw
+        if isinstance(out, Exception):
+            raise out
+        return out
+
+    monkeypatch.setattr(digest, "__file__", str(tmp_path / "digest.py"))  # last_run.txt
+    monkeypatch.setattr(digest, "_check_env", lambda: None)
+    monkeypatch.setattr(digest, "load_state", lambda: {})
+    monkeypatch.setattr(digest, "save_state", lambda st: saved.append(dict(st)))
+    monkeypatch.setattr(digest, "fetch_rss_articles", lambda *a, **k: ([article], rss_stats))
+    monkeypatch.setattr(digest, "generate_anchored_queries", lambda a: [])
+    monkeypatch.setattr(digest, "QUERY_SLOTS", ())
+    monkeypatch.setattr(digest, "_load_prompt", lambda f, *a: f)
+    monkeypatch.setattr(digest, "call_llm", fake_llm)
+    return digest, saved
+
+
+def test_failed_threat_triage_leaves_no_cooldown_and_fails_the_run(monkeypatch, tmp_path):
+    digest, saved = _run_with(monkeypatch, tmp_path,
+                              RuntimeError("timeout"), '{"skip": true}')
+    with pytest.raises(RuntimeError, match="Threat triage degraded"):
+        digest.run()
+    assert saved and all(not s for s in saved)  # state saved, nothing cooled down
+
+
+def test_clean_skip_still_cools_down_candidates(monkeypatch, tmp_path):
+    digest, saved = _run_with(monkeypatch, tmp_path, '{"skip": true}', '{"skip": true}')
+    digest.run()  # no raise
+    assert saved[-1]["https://ex.com/a"]["status"] == "candidate"

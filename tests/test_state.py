@@ -257,3 +257,13 @@ def test_morning_delivery_still_makes_late_evening_run_the_recheck(freeze_utc):
     state.record_sent(st, ["https://ex.com/morning"], headline="h")
     freeze_utc("2026-09-15T00:54")
     assert state.sent_today(st) is True
+
+
+def test_partial_delivery_does_not_count_as_the_days_digest(freeze_utc):
+    """A delivery made while threat triage was down still suppresses its URL but
+    must not demote the afternoon run to critical-only."""
+    st: dict = {}
+    freeze_utc("2026-09-14T13:16")
+    state.record_sent(st, ["https://ex.com/tool"], headline="h", partial=True)
+    assert state.sent_today(st) is False
+    assert state.is_excluded("https://ex.com/tool", st, sent_only=True) is True
