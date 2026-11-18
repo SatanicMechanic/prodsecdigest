@@ -12,6 +12,7 @@ Pipeline:
 """
 
 import json
+import math
 import os
 import datetime
 import concurrent.futures
@@ -26,13 +27,15 @@ from llm import (
 from config import (
     COMPLIANCE_QUERIES, PQC_QUERIES,
     TRIAGE_GLOBAL_CAP, TRIAGE_TOOLING_CAP,
-    LLM_TIMEOUT_SEC, LLM_API_KEY_ENV, LLM_MODEL, LLM_PROVIDER,
+    LLM_API_KEY_ENV, LLM_MODEL, LLM_PROVIDER,
     LLM_BASE_URL, LLM_EXTRA, PROVIDERS,
+    LOOKBACK_CAP_HOURS, LOOKBACK_MARGIN_HOURS,
     MAX_SEARCH_RESULTS, BROAD_SEARCH_RESULTS,
 )
 from fetchers import fetch_rss_articles, fetch_search_articles
 from state import (load_state, save_state, record_candidates, record_sent,
-                   recent_sent_headlines, sent_today, normalize_url, digest_day)
+                   recent_sent_headlines, sent_today, normalize_url, digest_day,
+                   record_clean_triage, last_clean_triage)
 from render import render_html, render_slack, render_text, subject_line
 from mailer import send_email
 from slack import send_slack
@@ -281,14 +284,44 @@ def get_lookback_hours() -> int:
     return 72 if digest_day().weekday() == 0 else 24
 
 
+def extended_lookback_hours(base_hours: int, last_clean: datetime.datetime | None,
+                            now: datetime.datetime) -> int:
+    """How far back this run must look, given when triage last ran clean.
+
+    A failed triage leaves its window unread, and the next run's fixed base
+    window (24h, 72h on Monday) can't always reach back to it: on 2026-11-17/18
+    a failed morning run, a failed evening run and the next morning's 24h window
+    left ~11 hours of threat coverage that no run ever triaged. So a run that
+    follows missed ones stretches its window back to the last clean triage.
+
+    Contract, pinned by tests/test_lookback.py:
+      - last_clean is None (first run, lost cache, unusable stamp): base_hours.
+      - Otherwise the gap since last_clean plus LOOKBACK_MARGIN_HOURS, rounded
+        UP to a whole hour, capped at LOOKBACK_CAP_HOURS.
+      - Never below base_hours, even when base_hours is already past the cap.
+      - last_clean in the future (clock skew): base_hours.
+    """
+    if last_clean is None:
+        return base_hours
+    gap_hours = (now - last_clean).total_seconds() / 3600
+    if gap_hours < 0:  # clock skew
+        return base_hours
+    wanted = math.ceil(gap_hours + LOOKBACK_MARGIN_HOURS)
+    return max(base_hours, min(wanted, LOOKBACK_CAP_HOURS))
+
+
 def run() -> None:
     _check_env()
-    lookback_hours = get_lookback_hours()
-    mode = "Monday catchup" if lookback_hours == 72 else "standard"
-    print(f"Lookback: {lookback_hours}h ({mode})")
-
+    base_hours = get_lookback_hours()
     state = load_state()
-    print(f"Loaded state: {len(state)} URLs in dedup/cooldown window.")
+    lookback_hours = extended_lookback_hours(
+        base_hours, last_clean_triage(state),
+        datetime.datetime.now(datetime.timezone.utc))
+    mode = "Monday catchup" if base_hours == 72 else "standard"
+    if lookback_hours > base_hours:
+        mode += f"; extended from {base_hours}h to reach the last clean triage"
+    print(f"Lookback: {lookback_hours}h ({mode})")
+    print(f"Loaded state: {len(state)} entries in dedup/cooldown window.")
 
     # An earlier run today already delivered, so this is the emergency
     # re-check rather than the daily digest. It exists because a low-stakes
@@ -437,11 +470,12 @@ def run() -> None:
     raw_tooling: str = ""
     threat_exc: Exception | None = None
     tooling_exc: Exception | None = None
-    # call_llm makes a single request and raises on failure (see llm.py —
-    # there is no provider fallback), so worst-case wall time for one future
-    # is roughly LLM_TIMEOUT_SEC. Add slack and let the future-level timeout
-    # act as a hard backstop if the SDK hangs instead of raising.
-    triage_deadline = LLM_TIMEOUT_SEC + 10
+    # No future-level timeout. call_llm retries (see llm.py — there is no
+    # provider fallback), so one call can take every attempt's timeout, and the
+    # `with` block waits for both threads regardless: a deadline here cannot
+    # bound the run, it can only discard an answer that was about to arrive.
+    # 2026-11-17/18: a 70s one did, failing two runs with a blank TimeoutError.
+    # The workflow's timeout-minutes is the real backstop.
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         fut_threat = executor.submit(
             call_llm, threat_prompt, threat_user_msg,
@@ -452,13 +486,13 @@ def run() -> None:
             temperature=0.15, json_mode=True,
         )
         try:
-            raw_threat = fut_threat.result(timeout=triage_deadline)
+            raw_threat = fut_threat.result()
         except Exception as exc:
             threat_exc = exc
             print(f"Threat triage call failed: {exc}")
         if fut_tooling is not None:
             try:
-                raw_tooling = fut_tooling.result(timeout=triage_deadline)
+                raw_tooling = fut_tooling.result()
             except Exception as exc:
                 tooling_exc = exc
                 print(f"Tooling triage call failed: {exc}")
@@ -542,6 +576,10 @@ def run() -> None:
     # override this with a longer TTL.
     if not degraded:
         record_candidates(state, [a["link"] for a in all_articles])
+        # A full triage ran clean, so the next run only needs to look back to
+        # here. Not the emergency re-check: it covers threats at a higher bar.
+        if not emergency:
+            record_clean_triage(state)
 
     items = _merge_triage_results(items_threat, items_tooling, emergency)
     if not items:

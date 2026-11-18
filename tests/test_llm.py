@@ -393,6 +393,72 @@ def test_call_llm_raises_http_error_on_bad_status(monkeypatch):
         llm.call_llm("sys", "user")
 
 
+# --- retry policy: what a caller's deadline has to outlast ---
+# 2026-11-17/18: a Cloudflare 520 from Mistral was never retried, and triage
+# failed with a blank TimeoutError() because digest.py gave up on a call after
+# 70s while its retries (up to ~3 minutes in all) were still in flight.
+
+def test_read_timeout_is_retried_not_fatal():
+    # One call can therefore take several LLM_TIMEOUT_SECs, which is why
+    # digest.py must not put its own deadline on the future.
+    from urllib3.exceptions import ReadTimeoutError
+    retry = llm._ADAPTER.max_retries
+    nxt = retry.increment(method="POST",
+                          error=ReadTimeoutError(None, "/", "read timed out"))
+    assert nxt.total == retry.total - 1
+
+
+@pytest.mark.parametrize("status", [520, 521, 522, 523, 524])
+def test_cloudflare_origin_errors_are_retried(status):
+    assert llm._ADAPTER.max_retries.is_retry("POST", status)
+
+
+def test_retry_after_is_capped():
+    # urllib3 honours Retry-After up to 6 hours by default; a provider or proxy
+    # sending 3600 must not park one call (and the 10-minute job) for an hour.
+    assert llm._ADAPTER.max_retries.parse_retry_after("3600") <= 30
+
+
+# --- circuit breaker: stop spending the job on best-effort calls in an outage ---
+# Query generation (6-7 calls) and enrichment (up to 3) run sequentially and
+# survive failure, but each can burn a full retry cycle (~3 min). In an outage
+# that ran the job into its timeout before triage got a turn.
+
+def _failing_post():
+    resp = mock.MagicMock()
+    resp.raise_for_status.side_effect = RuntimeError("HTTP 520")
+    return mock.MagicMock(return_value=resp)
+
+
+def test_best_effort_calls_are_skipped_once_the_provider_is_clearly_down(monkeypatch):
+    monkeypatch.setenv(llm.LLM_API_KEY_ENV, "tok")
+    monkeypatch.setattr(llm, "_fail_streak", 0)
+    post = _failing_post()
+    with mock.patch.object(llm._SESSION, "post", post):
+        for _ in range(llm.BREAKER_STREAK):
+            with pytest.raises(RuntimeError, match="520"):
+                llm.call_llm("s", "u", best_effort=True)
+        made = post.call_count
+        with pytest.raises(RuntimeError, match="skipped"):
+            llm.call_llm("s", "u", best_effort=True)
+    assert post.call_count == made  # skipped means no request left the process
+
+
+def test_critical_calls_ignore_an_open_breaker(monkeypatch):
+    monkeypatch.setenv(llm.LLM_API_KEY_ENV, "tok")
+    monkeypatch.setattr(llm, "_fail_streak", llm.BREAKER_STREAK + 5)
+    with mock.patch.object(llm._SESSION, "post", _make_mock_post("ok")):
+        assert llm.call_llm("s", "u") == "ok"  # triage must always get its try
+
+
+def test_a_success_closes_the_breaker(monkeypatch):
+    monkeypatch.setenv(llm.LLM_API_KEY_ENV, "tok")
+    monkeypatch.setattr(llm, "_fail_streak", llm.BREAKER_STREAK)
+    with mock.patch.object(llm._SESSION, "post", _make_mock_post("ok")):
+        llm.call_llm("s", "u")  # critical call succeeds
+        assert llm.call_llm("s", "u", best_effort=True) == "ok"
+
+
 # --- parse_triage_output drop accounting ---
 # An empty list from the guards looks identical to an editorial skip. The
 # caller needs the counts to tell a broken run from a quiet one.

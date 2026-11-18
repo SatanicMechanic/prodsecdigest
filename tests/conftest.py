@@ -15,6 +15,14 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 os.environ.setdefault("LLM_MODEL", "test-model")
 
 
+@pytest.fixture(autouse=True)
+def _closed_llm_breaker(monkeypatch):
+    """llm._fail_streak is process-global; a failing-call test must not leave
+    the breaker open for whichever test happens to run next."""
+    import llm  # here, not at top: config must load after LLM_MODEL is set
+    monkeypatch.setattr(llm, "_fail_streak", 0)
+
+
 @pytest.fixture
 def freeze_utc(monkeypatch):
     """Pin the digest-day clock (state.py) to a UTC instant:

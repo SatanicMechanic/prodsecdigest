@@ -33,7 +33,11 @@ concurrency:
 jobs:
   digest:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # One LLM call can retry for ~3 minutes (llm.py), and an outage costs two
+    # such calls (llm.BREAKER_STREAK) before triage, then triage's own: 10
+    # minutes left the run cancelled by timeout instead of failing with its
+    # own message. This is the real backstop; there is no deadline in the code.
+    timeout-minutes: 15
     # This repo is a template — inert here, active in private mirrors. Without
     # this the schedule fires twice daily upstream with no secrets and no
     # LLM_MODEL, failing every run.

@@ -258,3 +258,76 @@ def test_clean_skip_still_cools_down_candidates(monkeypatch, tmp_path):
     digest, saved = _run_with(monkeypatch, tmp_path, '{"skip": true}', '{"skip": true}')
     digest.run()  # no raise
     assert saved[-1]["https://ex.com/a"]["status"] == "candidate"
+
+
+def test_triage_futures_carry_no_deadline_of_their_own(monkeypatch, tmp_path):
+    # A future-level timeout cannot bound the run (the executor's `with` waits
+    # for its threads anyway); it can only discard an answer that was about to
+    # arrive. 2026-11-17/18: a 70s one failed two runs mid-retry.
+    import concurrent.futures
+    digest, _ = _run_with(monkeypatch, tmp_path, '{"skip": true}', '{"skip": true}')
+    seen = []
+    real = concurrent.futures.Future.result
+
+    def spy(self, timeout=None):
+        seen.append(timeout)
+        return real(self, timeout)
+
+    monkeypatch.setattr(concurrent.futures.Future, "result", spy)
+    digest.run()
+    assert seen and all(t is None for t in seen)
+
+
+# --- last-clean-triage stamp: written only by a clean, full triage ---
+
+def _stamp(saved):
+    import state
+    return state.last_clean_triage(saved[-1]) if saved else None
+
+
+def test_a_clean_run_stamps_the_triage_time(monkeypatch, tmp_path):
+    digest, saved = _run_with(monkeypatch, tmp_path, '{"skip": true}', '{"skip": true}')
+    digest.run()
+    assert _stamp(saved) is not None
+
+
+def test_a_degraded_run_does_not_stamp(monkeypatch, tmp_path):
+    digest, saved = _run_with(monkeypatch, tmp_path,
+                              RuntimeError("timeout"), '{"skip": true}')
+    with pytest.raises(RuntimeError, match="Threat triage degraded"):
+        digest.run()
+    assert saved and _stamp(saved) is None
+
+
+def test_the_emergency_recheck_does_not_stamp(monkeypatch, tmp_path):
+    # It triages threats at a higher bar and skips tooling, so it covers less
+    # than a full run and must not shorten the next run's catch-up window.
+    digest, saved = _run_with(monkeypatch, tmp_path, '{"skip": true}', '{"skip": true}')
+    monkeypatch.setattr(digest, "sent_today", lambda st: True)
+    digest.run()
+    assert saved and _stamp(saved) is None
+
+
+def test_run_looks_back_as_far_as_the_policy_says(monkeypatch, tmp_path):
+    import state
+    digest, _ = _run_with(monkeypatch, tmp_path, '{"skip": true}', '{"skip": true}')
+    prior: dict = {}
+    state.record_clean_triage(prior)
+    monkeypatch.setattr(digest, "load_state", lambda: dict(prior))
+
+    asked = {}
+
+    def policy(base, last_clean, now):
+        asked.update(base=base, last_clean=last_clean)
+        return 55
+
+    fetched = []
+    real_fetch = digest.fetch_rss_articles
+    monkeypatch.setattr(digest, "extended_lookback_hours", policy)
+    monkeypatch.setattr(digest, "fetch_rss_articles",
+                        lambda hours, *a, **k: (fetched.append(hours),
+                                                real_fetch(hours, *a, **k))[1])
+    digest.run()
+    assert fetched == [55]
+    assert asked["last_clean"] == state.last_clean_triage(prior)
+    assert asked["base"] in (24, 72)

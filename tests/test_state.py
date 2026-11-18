@@ -267,3 +267,47 @@ def test_partial_delivery_does_not_count_as_the_days_digest(freeze_utc):
     state.record_sent(st, ["https://ex.com/tool"], headline="h", partial=True)
     assert state.sent_today(st) is False
     assert state.is_excluded("https://ex.com/tool", st, sent_only=True) is True
+
+
+# --- last-clean-triage stamp: lets a run after missed ones look further back ---
+# 2026-11-17/18: failed runs left a gap the next run's fixed 24h window could
+# not reach. Dates are too coarse for this (two runs a day), so the stamp is a
+# timestamp stored beside the URL entries.
+
+def test_clean_triage_stamp_survives_a_save_and_load(tmp_path, monkeypatch, freeze_utc):
+    monkeypatch.setattr(state, "_state_path", lambda: str(tmp_path / "state.json"))
+    freeze_utc("2026-11-18T12:00")
+    st: dict = {}
+    state.record_clean_triage(st)
+    state.save_state(st)
+    assert state.last_clean_triage(state.load_state()) == datetime.datetime(
+        2026, 11, 18, 12, 0, tzinfo=datetime.timezone.utc)
+
+
+def test_an_old_stamp_is_not_pruned_by_the_url_ttls(tmp_path, monkeypatch):
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({state._META_KEY: {
+        "status": "meta", "at": "2026-01-01T00:00:00+00:00"}}))
+    monkeypatch.setattr(state, "_state_path", lambda: str(path))
+    assert state.last_clean_triage(state.load_state()) is not None
+
+
+def test_the_stamp_is_not_mistaken_for_a_url_entry(freeze_utc):
+    freeze_utc("2026-11-18T12:00")
+    st: dict = {}
+    state.record_clean_triage(st)
+    assert not state.sent_today(st)
+    assert state.recent_sent_headlines(st) == []
+    assert not state.is_excluded("https://ex.com/a", st)
+
+
+@pytest.mark.parametrize("meta", [
+    None,                              # never stamped
+    "x",                               # wrong type
+    {},                                # no timestamp
+    {"at": "garbage"},                 # unparseable
+    {"at": "2026-11-18T12:00:00"},     # naive: cannot be compared with now(UTC)
+])
+def test_an_unusable_stamp_reads_as_none(meta):
+    st = {} if meta is None else {state._META_KEY: meta}
+    assert state.last_clean_triage(st) is None

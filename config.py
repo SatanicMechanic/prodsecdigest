@@ -163,6 +163,13 @@ STATE_PATH = "state.json"
 STATE_SENT_TTL_DAYS = 30
 STATE_CANDIDATE_COOLDOWN_DAYS = 5
 
+# Catch-up after missed triage (digest.extended_lookback_hours): a run that
+# follows failed ones looks back to the last clean triage plus this margin,
+# but never further than the cap. A longer window means more articles in the
+# triage prompt; 72h is the Monday window, the largest one known to work.
+LOOKBACK_CAP_HOURS = 72
+LOOKBACK_MARGIN_HOURS = 2
+
 # ---------------------------------------------------------------------------
 # Brave Search
 # ---------------------------------------------------------------------------

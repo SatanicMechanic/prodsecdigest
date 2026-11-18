@@ -26,6 +26,10 @@ _TRACKING_PARAMS = frozenset({
     "_hsenc", "_hsmi", "ck_subscriber_id", "yclid", "msclkid",
 })
 
+# Not a URL: the stamp of the last clean triage lives beside the URL entries
+# under this key. load_state special-cases it (no TTL, no re-keying).
+_META_KEY = "__last_clean_triage__"
+
 
 def normalize_url(url: str) -> str:
     """Canonicalize a URL for dedup comparison.
@@ -115,7 +119,7 @@ def load_state() -> dict:
 
     pruned: dict = {}
     for url, entry in raw.items():
-        if not isinstance(entry, dict):
+        if url == _META_KEY or not isinstance(entry, dict):
             continue
         status = entry.get("status")
         date = entry.get("date", "")
@@ -127,6 +131,8 @@ def load_state() -> dict:
         key = normalize_url(url)
         if pruned.get(key, {}).get("status") != "sent":
             pruned[key] = entry
+    if isinstance(raw.get(_META_KEY), dict):
+        pruned[_META_KEY] = raw[_META_KEY]
     return pruned
 
 
@@ -186,6 +192,28 @@ def record_sent(state: dict, urls: list[str], headline: str = "",
         if partial:
             entry["partial"] = True
         state[norm] = entry
+
+
+def record_clean_triage(state: dict) -> None:
+    """Stamp now as the last time a full triage ran without degradation.
+
+    Status "meta" keeps the sent/candidate logic from ever reading it. A date
+    would be too coarse: both daily runs share a digest day, and the catch-up
+    window needs the hour.
+    """
+    state[_META_KEY] = {
+        "status": "meta",
+        "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+
+def last_clean_triage(state: dict) -> datetime.datetime | None:
+    """When triage last ran clean, or None if never stamped or unusable."""
+    try:
+        at = datetime.datetime.fromisoformat(state[_META_KEY]["at"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return at if at.tzinfo else None  # a naive time can't be compared with now(UTC)
 
 
 def sent_today(state: dict) -> bool:

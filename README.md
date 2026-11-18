@@ -262,7 +262,7 @@ RSS sources live in `feeds.md` (markdown link list parsed at import). Most other
 - `MAX_SEARCH_QUERIES` (6) — anchored (1) + independent (5) fire-tier queries. `OWN_PRODUCT_QUERIES` (1), `TOOLING_SCAN_QUERIES` (1) and `AI_LAB_QUERIES` (2) are separate slots that run every day; `COMPLIANCE_QUERIES` (1) and `PQC_QUERIES` (1) are separate too but run only on the Monday catch-up
 - `MAX_SEARCH_RESULTS` (5) / `BROAD_SEARCH_RESULTS` (3) — Brave results fetched per query; abstract query types (independent/compliance/PQC) use the smaller count to shrink trending-news backfill
 - `BRAVE_GOGGLES` (env, optional) — URL of a Brave goggle to bias results toward a curated source set. The repo ships `security-news.goggle` (boosts primary security news/advisories, downranks aggregator backfill). Brave fetches the goggle at query time, so the URL must be publicly reachable — **a private fork's own raw URL won't work**; point at this repo's copy (`https://raw.githubusercontent.com/SatanicMechanic/prodsecdigest/main/security-news.goggle`), or host a customized goggle at any public URL (a public gist works). Because it must be public, keep customizations generic — don't encode stack hints. Boost-only by design; hard exclusions stay in the testable `config.py` blocklists
-- `LLM_TIMEOUT_SEC` (60) — per-provider request budget; each parallel triage future gets this plus 10 seconds before timing out
+- `LLM_TIMEOUT_SEC` (60) — per-provider request budget; each attempt gets this long, and a failed call is retried twice
 
 The triage bars live in `prompt_threat.txt` (fire-tier threats + compliance) and `prompt_tooling.txt` (platform/CI/CD/OSS-tool features). Tuning what qualifies is a prompt edit, not a code change. Slot caps (`TRIAGE_GLOBAL_CAP`, `TRIAGE_TOOLING_CAP`) are in `config.py`.
 
@@ -294,7 +294,7 @@ The author's own instance currently runs at **$0/month**, using `mistral-medium-
 - **All feeds dead**: RSS pool empty; search-only digest if queries still generate; SKIP if nothing found
 - **Brave Search down / key missing**: `fetch_search_articles` returns empty, RSS-only digest
 - **LLM provider down**: query generation logs a warning and continues with no queries for that slot. If every triage call fails, state is persisted and the run raises, so the Actions run goes red and GitHub's failure notification fires. There is no fallback provider — a failed run means no digest that cycle
-- **Triage hangs**: each future is bounded by `LLM_TIMEOUT_SEC + 10` seconds so the workflow doesn't sit until the 10‑minute job timeout
+- **Triage hangs**: each attempt is bounded by `LLM_TIMEOUT_SEC` and a call retries twice (up to ~3 minutes); past that the workflow ends at the 15‑minute job timeout
 - **Enrichment fetch/LLM failure**: per-item and best-effort; the digest ships with the triage-time why/action
 - **Resend 4xx/5xx**: raises; state is not updated, so the next run will re-consider the same articles
 - **Slack webhook down / URL missing**: logged and ignored; email delivery (the delivery of record) is unaffected

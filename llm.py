@@ -63,7 +63,12 @@ _ADAPTER = HTTPAdapter(max_retries=Retry(
     total=2,
     backoff_factor=2,
     allowed_methods={"POST"},
-    status_forcelist=(429, 500, 502, 503, 504),
+    # 520-524 are Cloudflare's origin errors; Mistral (fronted by it) returned a
+    # bare 520 on 2026-11-17 that went unretried.
+    status_forcelist=(429, 500, 502, 503, 504, 520, 521, 522, 523, 524),
+    # urllib3 honours Retry-After up to 6 hours by default, which would park a
+    # single call for the rest of the job.
+    retry_after_max=30,
 ))
 # http:// too: ollama's default endpoint is plain http on localhost.
 for _scheme in ("https://", "http://"):
@@ -100,19 +105,42 @@ def _chat_completion(base_url: str, api_key: str, model: str,
     return content.strip()
 
 
+# Consecutive failed calls — each already a full retry cycle, ~3 minutes —
+# after which best-effort calls stop trying. Any success resets it. Threads
+# race on the counter benignly: off by one only moves the cutoff by one call.
+BREAKER_STREAK = 2
+_fail_streak = 0
+
+
 def call_llm(system_prompt: str, user_message: str,
              temperature: float = 0.15,
-             json_mode: bool = False) -> str:
+             json_mode: bool = False,
+             best_effort: bool = False) -> str:
     """Call the configured provider (any OpenAI-compatible endpoint).
 
     Raises on failure rather than falling back to a second provider — callers
     already degrade safely (a failed triage skips the digest for that run).
+
+    best_effort=True marks a call whose failure the caller shrugs off (query
+    generation, enrichment). Once BREAKER_STREAK calls in a row have failed,
+    those are skipped rather than each spending another retry cycle: in an
+    outage the sequential ones used to run the job into its timeout before
+    triage got a turn. Triage is never best-effort, so it always gets its try.
     """
-    return _chat_completion(
-        LLM_BASE_URL, os.environ[LLM_API_KEY_ENV], LLM_MODEL,
-        system_prompt, user_message, temperature, json_mode,
-        extra=json.loads(LLM_EXTRA) if LLM_EXTRA else None,
-    )
+    global _fail_streak
+    if best_effort and _fail_streak >= BREAKER_STREAK:
+        raise RuntimeError(f"skipped: the last {_fail_streak} LLM calls all failed")
+    try:
+        out = _chat_completion(
+            LLM_BASE_URL, os.environ[LLM_API_KEY_ENV], LLM_MODEL,
+            system_prompt, user_message, temperature, json_mode,
+            extra=json.loads(LLM_EXTRA) if LLM_EXTRA else None,
+        )
+    except Exception:
+        _fail_streak += 1
+        raise
+    _fail_streak = 0
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +323,8 @@ def _generate_queries(system: str, ask: str, lookback_hours: int, n: int,
         f"{ask}"
     )
     try:
-        raw = call_llm(system, user, temperature=temperature, json_mode=True)
+        raw = call_llm(system, user, temperature=temperature, json_mode=True,
+                       best_effort=True)
     except Exception as exc:
         # A blip during query generation must not abort the run: the search
         # stage already tolerates an empty spec list, and the RSS pool is
@@ -355,7 +384,8 @@ def generate_anchored_queries(rss_articles: list[dict]) -> list[str]:
         f"or [] if nothing warrants follow-up."
     )
     try:
-        raw = call_llm(system, user, temperature=0.2, json_mode=True)
+        raw = call_llm(system, user, temperature=0.2, json_mode=True,
+                       best_effort=True)
     except Exception as exc:
         print(f"Warning: anchored query generation failed ({exc}); continuing without them.")
         return []
@@ -635,7 +665,8 @@ def generate_slow_queries(lookback_hours: int) -> tuple[list[str], list[str]]:
         f"and {PQC_QUERIES} post-quantum cryptography queries."
     )
     try:
-        raw = call_llm(_SLOW_QUERY_SYSTEM, user, temperature=0.3, json_mode=True)
+        raw = call_llm(_SLOW_QUERY_SYSTEM, user, temperature=0.3, json_mode=True,
+                       best_effort=True)
     except Exception as exc:
         print(f"Warning: slow-beat query generation failed ({exc}); continuing without them.")
         return [], []
@@ -752,7 +783,8 @@ def enrich_items(items: list[dict]) -> list[dict]:
                 + text
                 + "\n---"
             )
-            raw = call_llm(_ENRICH_SYSTEM, user, temperature=0.15, json_mode=True)
+            raw = call_llm(_ENRICH_SYSTEM, user, temperature=0.15, json_mode=True,
+                           best_effort=True)
             data = json.loads(_strip_fences(raw))
             if data.get("in_scope") is False:
                 # Enrichment refines the explanation; it does not re-litigate
